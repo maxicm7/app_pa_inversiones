@@ -1,0 +1,15 @@
+streamlit
+requests
+pandas
+numpy
+yfinance
+beautifulsoup4
+huggingface_hub
+scipy
+plotly
+PyPDF
+statsmodels
+prophet
+google-generativeai
+openai
+tbats
