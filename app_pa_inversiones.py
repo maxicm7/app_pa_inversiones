@@ -239,7 +239,7 @@ def page_corporate_dashboard():
                             w = [float(x) for x in new_weights.split(",") if x.strip()]
                             if len(t) == len(w) and abs(sum(w)-1.0) < 0.02:
                                 if new_name != edit_sel:
-                                    del st.session_state.portfolios[edit_sel] # Borrar el viejo si cambió de nombre
+                                    del st.session_state.portfolios[edit_sel]
                                 st.session_state.portfolios[new_name] = {"tickers": t, "weights": w}
                                 save_portfolios_to_file(st.session_state.portfolios)
                                 st.success("Cartera actualizada.")
@@ -267,14 +267,117 @@ def page_corporate_dashboard():
     portfolios = st.session_state.get("portfolios", {})
     if not portfolios: return
 
-    # --- TAB 2: OPTIMIZACIÓN Y COPILOT IA ---
+    # --- TAB 2: RENDIMIENTO HISTÓRICO + OPTIMIZACIÓN ---
     with tabs[1]:
         st.markdown("---")
         col1, col2, col3 = st.columns(3)
-        p_sel = col1.selectbox("Analizar Cartera (Optimización):", list(portfolios.keys()))
+        p_sel = col1.selectbox("Analizar Cartera:", list(portfolios.keys()))
         d_start = col2.date_input("Desde", pd.to_datetime("2023-01-01"))
         d_end = col3.date_input("Hasta", pd.to_datetime("today"))
-        
+
+        # ── SECCIÓN: RENDIMIENTO HISTÓRICO ────────────────────────────────
+        st.subheader("📈 Rendimiento Histórico del Portafolio")
+
+        if st.button("📊 Ver Rendimiento Histórico"):
+            with st.spinner("Descargando datos históricos..."):
+                prices_perf = fetch_stock_prices_for_portfolio(portfolios[p_sel]["tickers"], d_start, d_end)
+
+            if prices_perf is not None:
+                current_weights = list(portfolios[p_sel]["weights"])
+                tickers_in_prices = [t for t in portfolios[p_sel]["tickers"] if t in prices_perf.columns]
+
+                if len(tickers_in_prices) < len(portfolios[p_sel]["tickers"]):
+                    missing = set(portfolios[p_sel]["tickers"]) - set(tickers_in_prices)
+                    st.warning(f"No se encontraron datos para: {', '.join(missing)}. Se recalculan los pesos.")
+                    idx_valid = [portfolios[p_sel]["tickers"].index(t) for t in tickers_in_prices]
+                    raw_w = [current_weights[i] for i in idx_valid]
+                    total_w = sum(raw_w)
+                    current_weights = [w / total_w for w in raw_w] if total_w > 0 else [1/len(raw_w)] * len(raw_w)
+
+                prices_filtered = prices_perf[tickers_in_prices]
+                norm_prices = prices_filtered / prices_filtered.iloc[0]
+                weights_arr = np.array(current_weights[:len(tickers_in_prices)])
+                portfolio_value = (norm_prices * weights_arr).sum(axis=1) * 100
+
+                # Métricas del rendimiento histórico
+                total_return = (portfolio_value.iloc[-1] / portfolio_value.iloc[0] - 1) * 100
+                daily_rets = portfolio_value.pct_change().dropna()
+                ann_vol = daily_rets.std() * np.sqrt(252) * 100
+                max_dd = ((portfolio_value / portfolio_value.cummax()) - 1).min() * 100
+                sharpe_hist = (daily_rets.mean() * 252) / (daily_rets.std() * np.sqrt(252)) if daily_rets.std() > 0 else 0
+
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("Retorno Total (Período)", f"{total_return:.2f}%", delta=f"{total_return:.2f}%")
+                m2.metric("Volatilidad Anualizada", f"{ann_vol:.2f}%")
+                m3.metric("Máximo Drawdown", f"{max_dd:.2f}%")
+                m4.metric("Sharpe Histórico", f"{sharpe_hist:.2f}")
+
+                # Gráfico principal: evolución del portafolio vs activos individuales
+                fig_perf = go.Figure()
+                colors_ind = px.colors.qualitative.Pastel
+                for i, ticker in enumerate(tickers_in_prices):
+                    fig_perf.add_trace(go.Scatter(
+                        x=norm_prices.index,
+                        y=norm_prices[ticker] * 100,
+                        mode='lines',
+                        name=ticker,
+                        line=dict(width=1.5, dash='dot', color=colors_ind[i % len(colors_ind)]),
+                        opacity=0.65
+                    ))
+
+                # Línea del portafolio (destacada)
+                fig_perf.add_trace(go.Scatter(
+                    x=portfolio_value.index,
+                    y=portfolio_value,
+                    mode='lines',
+                    name=f"📂 {p_sel} (Portafolio)",
+                    line=dict(width=3, color='#00CC96'),
+                    fill='tozeroy',
+                    fillcolor='rgba(0, 204, 150, 0.07)'
+                ))
+
+                fig_perf.add_hline(y=100, line_dash="dash", line_color="gray", opacity=0.4, annotation_text="Base 100")
+
+                fig_perf.update_layout(
+                    title=f"Evolución Histórica – {p_sel} (Base 100)",
+                    template="plotly_dark",
+                    height=430,
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                    yaxis_title="Valor (Base 100)",
+                    xaxis_title="Fecha",
+                    hovermode="x unified"
+                )
+                st.plotly_chart(fig_perf, use_container_width=True)
+
+                # Gráfico de Drawdown
+                drawdown_series = (portfolio_value / portfolio_value.cummax() - 1) * 100
+                fig_dd = go.Figure()
+                fig_dd.add_trace(go.Scatter(
+                    x=drawdown_series.index,
+                    y=drawdown_series,
+                    mode='lines',
+                    fill='tozeroy',
+                    fillcolor='rgba(239,85,59,0.2)',
+                    line=dict(color='#EF553B', width=1.5),
+                    name='Drawdown'
+                ))
+                fig_dd.update_layout(
+                    title="Drawdown del Portafolio (%)",
+                    template="plotly_dark",
+                    height=230,
+                    yaxis_title="Caída desde máximo (%)",
+                    xaxis_title="Fecha",
+                    showlegend=False
+                )
+                st.plotly_chart(fig_dd, use_container_width=True)
+
+            else:
+                st.error("No se pudieron obtener datos para los tickers del portafolio seleccionado.")
+
+        # ── SECCIÓN: OPTIMIZACIÓN ─────────────────────────────────────────
+        st.markdown("---")
+        st.subheader("⚙️ Optimización de Portafolio")
+
         c_opt1, c_opt2 = st.columns(2)
         with c_opt1:
             risk_free = st.number_input("Tasa Libre Riesgo (RF)", 0.0, 0.5, 0.04, step=0.01)
@@ -383,7 +486,7 @@ def page_fixed_income():
                                 last_price = df_hist["ultimoPrecio"].iloc[-1]
                                 fetched_bonds.append({
                                     "Bono": t,
-                                    "Cupón (%)": 5.0, # Valores a completar por el usuario
+                                    "Cupón (%)": 5.0,
                                     "YTM (%)": 10.0,
                                     "Años a Venc.": 3.0,
                                     "Nominal Invertido": 10000,
@@ -666,7 +769,6 @@ def page_ai_strategy_assistant():
                         raw_response = response.text
                     
                     if raw_response:
-                        # Limpiar la respuesta para asegurar que es un JSON (quita los bloques markdown de código si los hay)
                         json_text = re.search(r'\{.*\}', raw_response, re.DOTALL)
                         
                         if json_text:
@@ -674,7 +776,6 @@ def page_ai_strategy_assistant():
                             
                             st.subheader("📊 Filtros Cuantitativos Sugeridos")
                             
-                            # Mostrar de forma visual amigable
                             col1, col2 = st.columns(2)
                             with col1:
                                 st.write("**Distribución de Activos (Allocation):**")
@@ -718,7 +819,6 @@ with st.sidebar.expander("🤖 IA (OpenAI / Copilot)", expanded=True):
 
 with st.sidebar.expander("🧠 IA (Gemini)", expanded=False):
     st.session_state.gemini_api_key = st.text_input("Gemini API Key", type="password", value=st.session_state.get('gemini_api_key', ''))
-    # Selección con los modelos más recientes de Gemini
     st.session_state.gemini_model = st.selectbox("Modelo Gemini", [
         "gemini-2.5-flash", 
         "gemini-2.0-flash", 
@@ -727,7 +827,6 @@ with st.sidebar.expander("🧠 IA (Gemini)", expanded=False):
         "gemini-pro"
     ])
 
-# Validación dinámica del motor de IA preferido según las llaves ingresadas
 st.sidebar.markdown("---")
 available_ais = []
 if OPENAI_OK and st.session_state.get('openai_api_key'): available_ais.append("OpenAI")
@@ -749,7 +848,7 @@ opciones = [
     "Inicio", 
     "📊 Dashboard Corporativo", 
     "🏛️ Renta Fija (Bonos y Curvas)", 
-    "🧠 Asistente Quant (Estrategia IA)",  # <--- NUEVA OPCIÓN AÑADIDA AQUÍ
+    "🧠 Asistente Quant (Estrategia IA)",
     "🏦 Explorador IOL API", 
     "🌎 Explorador Global (Yahoo)", 
     "🔭 Modelos Avanzados (Forecast)", 
@@ -764,8 +863,12 @@ if sel != st.session_state.selected_page: st.session_state.selected_page = sel; 
 if sel == "Inicio": st.title("BPNos - Finanzas Corporativas"); st.info("Seleccione un módulo en la barra lateral.")
 elif sel == "📊 Dashboard Corporativo": page_corporate_dashboard()
 elif sel == "🏛️ Renta Fija (Bonos y Curvas)": page_fixed_income()
-elif sel == "🧠 Asistente Quant (Estrategia IA)": page_ai_strategy_assistant() # <--- NUEVO RUTEO AÑADIDO AQUÍ
+elif sel == "🧠 Asistente Quant (Estrategia IA)": page_ai_strategy_assistant()
 elif sel == "🏦 Explorador IOL API": page_iol_explorer()
+elif sel == "🌎 Explorador Global (Yahoo)": page_yahoo_explorer()
+elif sel == "🔭 Modelos Avanzados (Forecast)": page_forecast()
+elif sel == "📰 Analizador Eventos (IA)": page_event_analyzer()
+elif sel == "💬 Chat IA General": page_chat_general()
 elif sel == "🌎 Explorador Global (Yahoo)": page_yahoo_explorer()
 elif sel == "🔭 Modelos Avanzados (Forecast)": page_forecast()
 elif sel == "📰 Analizador Eventos (IA)": page_event_analyzer()
