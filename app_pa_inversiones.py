@@ -286,13 +286,21 @@ def page_corporate_dashboard():
                 current_weights = list(portfolios[p_sel]["weights"])
                 tickers_in_prices = [t for t in portfolios[p_sel]["tickers"] if t in prices_perf.columns]
 
+                if not tickers_in_prices:
+                    st.error("⚠️ No se encontraron datos de precios para ningún ticker del portafolio. Verificá los símbolos o el rango de fechas seleccionado.")
+                    st.stop()
+
                 if len(tickers_in_prices) < len(portfolios[p_sel]["tickers"]):
                     missing = set(portfolios[p_sel]["tickers"]) - set(tickers_in_prices)
-                    st.warning(f"No se encontraron datos para: {', '.join(missing)}. Se recalculan los pesos.")
+                    st.warning(f"No se encontraron datos para: {', '.join(missing)}. Se recalculan los pesos con los activos disponibles.")
                     idx_valid = [portfolios[p_sel]["tickers"].index(t) for t in tickers_in_prices]
                     raw_w = [current_weights[i] for i in idx_valid]
                     total_w = sum(raw_w)
-                    current_weights = [w / total_w for w in raw_w] if total_w > 0 else [1/len(raw_w)] * len(raw_w)
+                    if total_w > 0:
+                        current_weights = [w / total_w for w in raw_w]
+                    else:
+                        n = len(tickers_in_prices)
+                        current_weights = [1.0 / n] * n
 
                 prices_filtered = prices_perf[tickers_in_prices]
                 norm_prices = prices_filtered / prices_filtered.iloc[0]
@@ -865,10 +873,6 @@ elif sel == "📊 Dashboard Corporativo": page_corporate_dashboard()
 elif sel == "🏛️ Renta Fija (Bonos y Curvas)": page_fixed_income()
 elif sel == "🧠 Asistente Quant (Estrategia IA)": page_ai_strategy_assistant()
 elif sel == "🏦 Explorador IOL API": page_iol_explorer()
-elif sel == "🌎 Explorador Global (Yahoo)": page_yahoo_explorer()
-elif sel == "🔭 Modelos Avanzados (Forecast)": page_forecast()
-elif sel == "📰 Analizador Eventos (IA)": page_event_analyzer()
-elif sel == "💬 Chat IA General": page_chat_general()
 elif sel == "🌎 Explorador Global (Yahoo)": page_yahoo_explorer()
 elif sel == "🔭 Modelos Avanzados (Forecast)": page_forecast()
 elif sel == "📰 Analizador Eventos (IA)": page_event_analyzer()
