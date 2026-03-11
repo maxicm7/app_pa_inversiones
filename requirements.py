@@ -13,3 +13,4 @@ prophet
 google-generativeai
 openai
 tbats
+pyportfolioopt
