@@ -97,22 +97,29 @@ def fetch_stock_prices_for_portfolio(tickers, start_date, end_date):
     if yf_tickers:
         try:
             adjusted_tickers = [t if "." in t or t.endswith("=X") else t+".BA" for t in yf_tickers]
-            raw = yf.download(adjusted_tickers, start=start_date, end=end_date, auto_adjust=True, progress=False)
+            raw = yf.download(adjusted_tickers, start=start_date, end=end_date, progress=False)
             
             if not raw.empty:
-                close_data = raw["Close"] if "Close" in raw.columns else raw
+                # Manejar el nuevo formato MultiIndex de yfinance (v0.2.40+)
+                if isinstance(raw.columns, pd.MultiIndex):
+                    if 'Close' in raw.columns.levels[0]:
+                        close_data = raw['Close']
+                    elif 'Adj Close' in raw.columns.levels[0]:
+                        close_data = raw['Adj Close']
+                    else:
+                        close_data = raw.iloc[:, 0:len(adjusted_tickers)] # Fallback
+                else:
+                    close_data = raw["Close"] if "Close" in raw.columns else raw
+                
                 if isinstance(close_data, pd.Series):
                     close_data = close_data.to_frame(name=yf_tickers[0])
                 
-                if len(adjusted_tickers) == 1:
-                     all_prices[yf_tickers[0]] = close_data.iloc[:, 0]
-                else:
-                    for col in close_data.columns:
-                        clean_col = str(col).replace(".BA", "")
-                        for original in yf_tickers:
-                            if clean_col == original or str(col) == original:
-                                all_prices[original] = close_data[col]
-                                break
+                for col in close_data.columns:
+                    clean_col = str(col).replace(".BA", "")
+                    for original in yf_tickers:
+                        if clean_col == original or str(col) == original:
+                            all_prices[original] = close_data[col]
+                            break
         except Exception as e:
             st.warning(f"Yahoo Finance warning: {e}")
 
@@ -127,26 +134,37 @@ def fetch_stock_prices_for_portfolio(tickers, start_date, end_date):
 
 def optimize_portfolio_corporate(prices, risk_free_rate=0.02, opt_type="Maximo Ratio Sharpe"):
     returns = prices.pct_change().dropna()
-    if returns.empty: return None
+    if returns.empty or len(returns) < 2: return None
 
+    # Intentar con PyPortfolioOpt si está disponible
     if PYPFOPT_OK:
         try:
             mu = expected_returns.mean_historical_return(prices, frequency=252)
             S = risk_models.sample_cov(prices, frequency=252)
-            ef = EfficientFrontier(mu, S, weight_bounds=(0, 1))
             
-            if opt_type == "Maximo Ratio Sharpe": ef.max_sharpe(risk_free_rate=risk_free_rate)
-            elif opt_type == "Minima Volatilidad": ef.min_volatility()
-            else: ef.max_quadratic_utility(risk_aversion=0.0001)
-            
-            weights = ef.clean_weights()
-            ret, vol, sharpe = ef.portfolio_performance(verbose=False, risk_free_rate=risk_free_rate)
-            ow_array = np.array([weights.get(col, 0) for col in prices.columns])
-            
-            return {"weights": ow_array, "expected_return": ret, "volatility": vol, "sharpe_ratio": sharpe, "tickers": list(prices.columns), "returns": returns, "method": "PyPortfolioOpt"}
+            if not mu.isnull().any() and not S.isnull().values.any():
+                ef = EfficientFrontier(mu, S, weight_bounds=(0, 1))
+                
+                if opt_type == "Maximo Ratio Sharpe": 
+                    ef.max_sharpe(risk_free_rate=risk_free_rate)
+                elif opt_type == "Minima Volatilidad": 
+                    ef.min_volatility()
+                else: 
+                    ef.max_quadratic_utility(risk_aversion=0.01) # Más estable que 0.0001
+                
+                weights = ef.clean_weights()
+                ret, vol, sharpe = ef.portfolio_performance(verbose=False, risk_free_rate=risk_free_rate)
+                ow_array = np.array([weights.get(col, 0) for col in prices.columns])
+                
+                return {
+                    "weights": ow_array, "expected_return": float(ret), 
+                    "volatility": float(vol), "sharpe_ratio": float(sharpe), 
+                    "tickers": list(prices.columns), "returns": returns, "method": "PyPortfolioOpt"
+                }
         except Exception:
-            pass
+            pass # Si falla, continúa con Scipy
 
+    # --- MÉTODO SCIPY (Fallback) ---
     mean_returns = returns.mean() * 252
     cov_matrix   = returns.cov() * 252
     n = len(mean_returns)
@@ -161,14 +179,35 @@ def optimize_portfolio_corporate(prices, risk_free_rate=0.02, opt_type="Maximo R
     bounds = tuple((0.0, 1.0) for _ in range(n))
     init = np.array([1/n] * n)
 
-    if opt_type == "Minima Volatilidad": fun = lambda w: get_metrics(w)[1]
-    elif opt_type == "Retorno Maximo": fun = lambda w: -get_metrics(w)[0]
-    else: fun = lambda w: -get_metrics(w)[2]
+    if opt_type == "Minima Volatilidad": 
+        fun = lambda w: get_metrics(w)[1]
+    elif opt_type == "Retorno Maximo": 
+        fun = lambda w: -get_metrics(w)[0]
+    else: # Max Sharpe
+        if (mean_returns < risk_free_rate).all(): # Si todo es pérdida, minimizar volatilidad
+            fun = lambda w: get_metrics(w)[1]
+        else:
+            fun = lambda w: -get_metrics(w)[2]
 
     res = minimize(fun, init, method='SLSQP', bounds=bounds, constraints=constraints)
-    final_metrics = get_metrics(res.x) if res.success else [0,0,0]
     
-    return {"weights": res.x, "expected_return": final_metrics[0], "volatility": final_metrics[1], "sharpe_ratio": final_metrics[2], "tickers": list(prices.columns), "returns": returns, "method": "Scipy/SLSQP"}
+    # Recuperación segura de pesos
+    final_weights = res.x if res.success else init
+    final_weights = np.maximum(final_weights, 0) # Prevenir pesos negativos minúsculos por error de coma flotante
+    if np.sum(final_weights) > 0:
+        final_weights = final_weights / np.sum(final_weights) # Forzar suma = 1
+        
+    final_metrics = get_metrics(final_weights)
+    
+    return {
+        "weights": final_weights, 
+        "expected_return": float(final_metrics[0]), 
+        "volatility": float(final_metrics[1]), 
+        "sharpe_ratio": float(final_metrics[2]), 
+        "tickers": list(prices.columns), 
+        "returns": returns, 
+        "method": "Scipy/SLSQP"
+    }
 
 def calc_bond_metrics(face_value, coupon_rate, ytm, years_to_maturity, freq=2):
     periods = int(years_to_maturity * freq)
@@ -405,8 +444,12 @@ def page_corporate_dashboard():
                     c_kpi3.metric("Ratio Sharpe", f"{res['sharpe_ratio']:.2f}")
 
                     w_df = pd.DataFrame({"Activo": res['tickers'], "Peso": res['weights']})
-                    fig = px.pie(w_df[w_df["Peso"]>0.001], values="Peso", names="Activo", title="Asignación", hole=0.4, template="plotly_dark")
-                    st.plotly_chart(fig, use_container_width=True)
+                    df_pie = w_df[w_df["Peso"] > 0.001]
+                    if not df_pie.empty:
+                        fig = px.pie(df_pie, values="Peso", names="Activo", title="Asignación", hole=0.4, template="plotly_dark")
+                        st.plotly_chart(fig, use_container_width=True)
+                    else:
+                        st.warning("No se pudo graficar la asignación (pesos no válidos).")
                 else: st.error("Error al optimizar.")
             else: st.error("Error en datos.")
 
