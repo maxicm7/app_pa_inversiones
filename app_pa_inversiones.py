@@ -889,10 +889,27 @@ else:
     st.session_state.preferred_ai = None
     st.sidebar.warning("⚠️ Ingresa una API Key para usar IA.")
 
-with st.sidebar.expander("🏦 IOL"):
-    user_iol = st.text_input("Usuario IOL")
-    pass_iol = st.text_input("Pass IOL", type="password")
-    if st.button("Conectar"): st.session_state.iol_username, st.session_state.iol_password = user_iol, pass_iol
+with st.sidebar.expander("🏦 Conexión IOL", expanded=True):
+    user_iol = st.text_input("Usuario IOL", value=st.session_state.get('iol_username', ''))
+    pass_iol = st.text_input("Contraseña IOL", type="password", value=st.session_state.get('iol_password', ''))
+    
+    if st.button("Conectar / Validar", use_container_width=True): 
+        st.session_state.iol_username = user_iol
+        st.session_state.iol_password = pass_iol
+        
+        with st.spinner("Validando credenciales..."):
+            client = get_iol_client()
+            if client is not None:
+                st.session_state.iol_connected = True
+            else:
+                st.session_state.iol_connected = False
+                
+    # Cartel visual JUSTO DEBAJO del botón
+    st.markdown("---")
+    if st.session_state.get('iol_connected'):
+        st.success(f"🟢 Conectado: {st.session_state.iol_username}")
+    else:
+        st.error("🔴 Desconectado")
 
 st.sidebar.markdown("---")
 opciones = [
