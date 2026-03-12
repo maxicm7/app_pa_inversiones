@@ -891,7 +891,6 @@ else:
 
 # ── SECCIÓN IOL MEJORADA EN EL SIDEBAR ──
 with st.sidebar.expander("🏦 Conexión IOL", expanded=True):
-    # Mantenemos los valores en los inputs si ya se ingresaron previamente
     user_iol = st.text_input("Usuario IOL", value=st.session_state.get('iol_username', ''))
     pass_iol = st.text_input("Contraseña IOL", type="password", value=st.session_state.get('iol_password', ''))
     
@@ -899,19 +898,19 @@ with st.sidebar.expander("🏦 Conexión IOL", expanded=True):
         st.session_state.iol_username = user_iol
         st.session_state.iol_password = pass_iol
         
-        # Validamos si la conexión es exitosa llamando al cliente
-        with st.spinner("Validando..."):
+        with st.spinner("Validando credenciales..."):
             client = get_iol_client()
             if client is not None:
                 st.session_state.iol_connected = True
             else:
                 st.session_state.iol_connected = False
                 
-    # Indicador visual del estado actual
-    if st.session_state.get('iol_connected') and st.session_state.get('iol_username'):
-        st.success(f"🟢 **Conectado:** {st.session_state.iol_username}")
+    # Cartel visual JUSTO DEBAJO del botón
+    st.markdown("---")
+    if st.session_state.get('iol_connected'):
+        st.success(f"🟢 Conectado: {st.session_state.iol_username}")
     else:
-        st.error("🔴 **Desconectado**")
+        st.error("🔴 Desconectado")
 
 st.sidebar.markdown("---")
 opciones = [
