@@ -13,4 +13,6 @@ prophet
 google-generativeai
 openai
 tbats
+xgboost
+lightgbm
 
