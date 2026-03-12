@@ -33,6 +33,20 @@ try:
 except ImportError:
     TBATS_OK = False
 
+# ── Intento de importar XGBoost ────────────────────────────────────────────
+try:
+    from xgboost import XGBRegressor
+    XGBOOST_OK = True
+except ImportError:
+    XGBOOST_OK = False
+
+# ── Intento de importar LightGBM ───────────────────────────────────────────
+try:
+    from lightgbm import LGBMRegressor
+    LIGHTGBM_OK = True
+except ImportError:
+    LIGHTGBM_OK = False
+
 # ═══════════════════════════════════════════════════════════════════════════
 #  GOOGLE GEMINI  –  cliente liviano (sin SDK externo)
 # ═══════════════════════════════════════════════════════════════════════════
@@ -165,38 +179,32 @@ def run_sarimax(target: pd.Series, exog_df: pd.DataFrame | None,
     """Ajusta SARIMAX y devuelve pronóstico + métricas."""
     target = target.dropna()
 
-    # Alinear exógenas si las hay
     if exog_df is not None and not exog_df.empty:
         exog_df = exog_df.reindex(target.index).ffill().dropna(how="all")
         common_idx = target.index.intersection(exog_df.index)
         target = target.loc[common_idx]
         exog_df = exog_df.loc[common_idx]
         exog_fit = exog_df
-        # Proyección futura de exógenas (últimos valores hacia adelante)
         last_exog = exog_df.iloc[[-1]]
         exog_future = pd.concat([last_exog] * horizon, ignore_index=True)
     else:
         exog_fit = None
         exog_future = None
 
-    # Ajuste
     model = SARIMAX(target, exog=exog_fit,
                     order=order, seasonal_order=seasonal_order,
                     enforce_stationarity=False, enforce_invertibility=False)
     fit = model.fit(disp=False)
 
-    # Pronóstico
     fc = fit.get_forecast(steps=horizon, exog=exog_future)
     fc_mean = fc.predicted_mean
     fc_ci   = fc.conf_int(alpha=0.05)
 
-    # Fechas futuras
     last_date = target.index[-1]
     future_dates = pd.bdate_range(start=last_date + timedelta(days=1), periods=horizon)
     fc_mean.index = future_dates
     fc_ci.index   = future_dates
 
-    # Métricas in-sample
     fitted = fit.fittedvalues
     resid  = target - fitted
     mae    = np.mean(np.abs(resid))
@@ -217,7 +225,7 @@ def run_sarimax(target: pd.Series, exog_df: pd.DataFrame | None,
 
 def run_prophet(target: pd.Series, exog_df: pd.DataFrame | None,
                 horizon: int = 30, country_holidays: str | None = None) -> dict:
-    """Ajusta Prophet (con regresores exógenos opcionales) y devuelve pronóstico."""
+    """Ajusta Prophet y devuelve pronóstico."""
     df_p = pd.DataFrame({"ds": target.index, "y": target.values})
 
     m = Prophet(daily_seasonality=False, weekly_seasonality=True, yearly_seasonality=True)
@@ -266,19 +274,11 @@ def run_prophet(target: pd.Series, exog_df: pd.DataFrame | None,
     }
 
 def run_tbats(target: pd.Series, horizon: int = 30, seasonal_periods: list = None) -> dict:
-    """Ajusta TBATS y devuelve pronóstico. (Modelo Univariado puro)."""
+    """Ajusta TBATS y devuelve pronóstico."""
     target = target.dropna()
+    if not seasonal_periods: seasonal_periods = None
 
-    if not seasonal_periods:
-        seasonal_periods = None
-
-    estimator = TBATS(
-        seasonal_periods=seasonal_periods,
-        use_arma_errors=True,
-        use_box_cox=None,
-        use_trend=None,
-        use_damped_trend=None
-    )
+    estimator = TBATS(seasonal_periods=seasonal_periods, use_arma_errors=True)
     model = estimator.fit(target.values)
 
     fc_mean, conf_int = model.forecast(steps=horizon, confidence_level=0.95)
@@ -289,13 +289,11 @@ def run_tbats(target: pd.Series, horizon: int = 30, seasonal_periods: list = Non
     fc_series = pd.Series(fc_mean, index=future_dates)
     ci_lower = pd.Series(conf_int["lower_bound"], index=future_dates)
     ci_upper = pd.Series(conf_int["upper_bound"], index=future_dates)
-
     fitted = pd.Series(model.y_hat, index=target.index)
 
     resid = target.values - model.y_hat
     mae = np.nanmean(np.abs(resid))
     rmse = np.sqrt(np.nanmean(resid**2))
-    aic = model.aic
 
     return {
         "model": "TBATS",
@@ -304,8 +302,108 @@ def run_tbats(target: pd.Series, horizon: int = 30, seasonal_periods: list = Non
         "ci_lower": ci_lower,
         "ci_upper": ci_upper,
         "target": target,
-        "metrics": {"MAE": round(mae, 4), "RMSE": round(rmse, 4), "AIC": round(aic, 2)},
-        "summary": f"Modelo TBATS Ajustado: {str(model)}"
+        "metrics": {"MAE": round(mae, 4), "RMSE": round(rmse, 4), "AIC": round(model.aic, 2)},
+        "summary": f"Modelo TBATS Ajustado:\n{str(model)}"
+    }
+
+def run_ml_forecaster(target: pd.Series, exog_df: pd.DataFrame | None, 
+                      horizon: int = 30, lags: int = 5, model_type: str = "XGBoost") -> dict:
+    """Ajusta XGBoost o LightGBM usando formato tabular y genera un pronóstico recursivo."""
+    target = target.dropna()
+    
+    # 1. Armar dataset tabular con rezagos (lags)
+    df = pd.DataFrame({"y": target})
+    feature_cols = []
+    
+    for i in range(1, lags + 1):
+        col_name = f"lag_{i}"
+        df[col_name] = target.shift(i)
+        feature_cols.append(col_name)
+        
+    # Incorporar variables exógenas
+    if exog_df is not None and not exog_df.empty:
+        exog_aligned = exog_df.reindex(target.index).ffill()
+        for col in exog_aligned.columns:
+            df[col] = exog_aligned[col]
+            feature_cols.append(col)
+            
+    df = df.dropna()
+    if df.empty or len(df) < lags + 2:
+        raise ValueError("No hay suficientes datos para entrenar el modelo con los rezagos especificados.")
+        
+    X = df[feature_cols]
+    y = df["y"]
+    
+    # 2. Inicializar Modelo
+    if model_type == "XGBoost":
+        model = XGBRegressor(n_estimators=100, learning_rate=0.05, max_depth=4, random_state=42)
+    else: # LightGBM
+        model = LGBMRegressor(n_estimators=100, learning_rate=0.05, max_depth=4, random_state=42, verbose=-1)
+        
+    # 3. Entrenar y obtener métricas in-sample
+    model.fit(X, y)
+    fitted = pd.Series(model.predict(X), index=df.index)
+    
+    # 4. Pronóstico Recursivo
+    predictions = []
+    current_history = list(target.values) # Para armar los rezagos del futuro
+    
+    if exog_df is not None and not exog_df.empty:
+        last_exog = exog_df.iloc[-1].to_dict() # FFill simple para el futuro
+    else:
+        last_exog = {}
+        
+    for step in range(horizon):
+        x_next = {}
+        for i in range(1, lags + 1):
+            x_next[f"lag_{i}"] = current_history[-i]
+            
+        if last_exog:
+            for col, val in last_exog.items():
+                x_next[col] = val
+                
+        # Empaquetamos en DataFrame para respetar orden de features
+        x_next_df = pd.DataFrame([x_next], columns=feature_cols)
+        pred = model.predict(x_next_df)[0]
+        
+        predictions.append(pred)
+        current_history.append(pred)
+        
+    # 5. Formatear salida e intervalos de confianza aproximados (crecientes)
+    last_date = target.index[-1]
+    future_dates = pd.bdate_range(start=last_date + timedelta(days=1), periods=horizon)
+    fc_mean = pd.Series(predictions, index=future_dates)
+    
+    resid = y - fitted
+    rmse = np.sqrt(np.mean(resid**2))
+    mae = np.mean(np.abs(resid))
+    
+    # Intervalo de Confianza dinámico: aumenta con el error estándar acumulado (sqrt(t))
+    ci_widths = [1.96 * rmse * np.sqrt(i) for i in range(1, horizon + 1)]
+    ci_lower = fc_mean - ci_widths
+    ci_upper = fc_mean + ci_widths
+    
+    # Extraer feature importances para el resumen
+    if hasattr(model, 'feature_importances_'):
+        importances = model.feature_importances_
+        if sum(importances) > 0:
+            importances = importances / sum(importances)
+        feat_imp = pd.Series(importances, index=feature_cols).sort_values(ascending=False).head(5)
+        imp_str = "\nTop 5 Variables Importantes (Importancia Relativa):\n" + feat_imp.to_string(float_format="{:.4f}".format)
+    else:
+        imp_str = ""
+
+    summary = f"Modelo: {model_type}\nRezagos Autoregresivos: {lags}\nObservaciones de Entrenamiento: {len(X)}\n" + imp_str
+    
+    return {
+        "model": model_type,
+        "fitted": fitted,
+        "forecast": fc_mean,
+        "ci_lower": ci_lower,
+        "ci_upper": ci_upper,
+        "target": target,
+        "metrics": {"MAE": round(mae, 4), "RMSE": round(rmse, 4), "AIC": "N/A"},
+        "summary": summary
     }
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -326,25 +424,21 @@ PALETTE = {
 def build_forecast_chart(result: dict, target_label: str) -> go.Figure:
     fig = go.Figure()
 
-    # Histórico
     fig.add_trace(go.Scatter(
         x=result["target"].index, y=result["target"].values,
         name="Histórico", line=dict(color=PALETTE["actual"], width=1.5), mode="lines"
     ))
-    # Ajuste in-sample
     fitted = result["fitted"].reindex(result["target"].index)
     fig.add_trace(go.Scatter(
         x=fitted.index, y=fitted.values,
         name="Ajuste modelo", line=dict(color=PALETTE["fitted"], width=1, dash="dot"), mode="lines"
     ))
-    # Banda de confianza
     fig.add_trace(go.Scatter(
         x=list(result["forecast"].index) + list(result["forecast"].index[::-1]),
         y=list(result["ci_upper"]) + list(result["ci_lower"][::-1]),
         fill="toself", fillcolor=PALETTE["ci"],
-        line=dict(color="rgba(0,0,0,0)"), name="IC 95 %", showlegend=True
+        line=dict(color="rgba(0,0,0,0)"), name="IC ~95 %", showlegend=True
     ))
-    # Pronóstico
     fig.add_trace(go.Scatter(
         x=result["forecast"].index, y=result["forecast"].values,
         name=f"Pronóstico ({result['model']})",
@@ -367,7 +461,6 @@ def build_forecast_chart(result: dict, target_label: str) -> go.Figure:
 
 
 def build_exog_chart(prices: pd.DataFrame, target_col: str, exog_cols: list[str]) -> go.Figure:
-    """Gráfico de correlaciones entre target y exógenas (retornos normalizados)."""
     returns = prices.pct_change().dropna()
     norm = (returns - returns.mean()) / returns.std()
 
@@ -446,7 +539,7 @@ def build_gemini_prompt(result: dict, exog_tickers: list[str], target_label: str
 ## Tarea
 1. Interpreta la calidad del ajuste del modelo basándote en las métricas.
 2. Analiza el pronóstico: ¿es alcista, bajista o neutro? ¿Con qué nivel de confianza?
-3. Explica el rol de cada variable exógena y si su inclusión mejora el modelo. (Si el modelo es TBATS, ignora su inclusión directa e interpreta el contexto general del mercado).
+3. Explica el rol de cada variable exógena y si su inclusión mejora el modelo. (Si es TBATS, XGBoost o LightGBM contextualiza de forma apropiada la naturaleza algoritmica de estos).
 4. Identifica riesgos clave para el pronóstico.
 5. Proporciona una recomendación de posicionamiento (comprar / mantener / vender / esperar) con justificación breve.
 6. Sé conciso: máximo 400 palabras. Usa viñetas cuando sea útil.
@@ -478,27 +571,35 @@ def page_forecast():
     """, unsafe_allow_html=True)
 
     st.markdown('<p class="fc-header">🔭 Módulo de Pronóstico con Variables Exógenas</p>', unsafe_allow_html=True)
-    st.markdown('<p class="fc-sub">SARIMAX · PROPHET · TBATS · GEMINI AI · GRANGER CAUSALITY</p>', unsafe_allow_html=True)
+    st.markdown('<p class="fc-sub">SARIMAX · PROPHET · TBATS · XGBOOST · LIGHTGBM · GEMINI AI</p>', unsafe_allow_html=True)
     st.markdown("---")
 
     # ── Verificación de dependencias ─────────────────────────────────────
-    col_d1, col_d2, col_d3, col_d4 = st.columns(4)
-    with col_d1:
+    r1c1, r1c2, r1c3 = st.columns(3)
+    with r1c1:
         label = '<span class="tag-ok">statsmodels ✓</span>' if STATSMODELS_OK else '<span class="tag-no">statsmodels ✗</span>'
         st.markdown(f"**SARIMAX:** {label}", unsafe_allow_html=True)
-    with col_d2:
+    with r1c2:
         label = '<span class="tag-ok">prophet ✓</span>' if PROPHET_OK else '<span class="tag-no">prophet ✗</span>'
         st.markdown(f"**Prophet:** {label}", unsafe_allow_html=True)
-    with col_d3:
+    with r1c3:
         label = '<span class="tag-ok">tbats ✓</span>' if TBATS_OK else '<span class="tag-no">tbats ✗</span>'
         st.markdown(f"**TBATS:** {label}", unsafe_allow_html=True)
-    with col_d4:
+
+    r2c1, r2c2, r2c3 = st.columns(3)
+    with r2c1:
+        label = '<span class="tag-ok">xgboost ✓</span>' if XGBOOST_OK else '<span class="tag-no">xgboost ✗</span>'
+        st.markdown(f"**XGBoost:** {label}", unsafe_allow_html=True)
+    with r2c2:
+        label = '<span class="tag-ok">lightgbm ✓</span>' if LIGHTGBM_OK else '<span class="tag-no">lightgbm ✗</span>'
+        st.markdown(f"**LightGBM:** {label}", unsafe_allow_html=True)
+    with r2c3:
         gemini_key = st.session_state.get("gemini_api_key", "")
         label = '<span class="tag-ok">key cargada ✓</span>' if gemini_key else '<span class="tag-no">sin key ✗</span>'
-        st.markdown(f"**Gemini:** {label}", unsafe_allow_html=True)
+        st.markdown(f"**Gemini AI:** {label}", unsafe_allow_html=True)
 
-    if not STATSMODELS_OK and not PROPHET_OK and not TBATS_OK:
-        st.error("Instala al menos uno: `pip install statsmodels`, `pip install prophet` o `pip install tbats`")
+    if not any([STATSMODELS_OK, PROPHET_OK, TBATS_OK, XGBOOST_OK, LIGHTGBM_OK]):
+        st.error("Instala al menos un modelo: `statsmodels`, `prophet`, `tbats`, `xgboost` o `lightgbm`")
         return
 
     st.markdown("---")
@@ -527,7 +628,13 @@ def page_forecast():
 
         c6, c7 = st.columns(2)
         with c6:
-            available_models = [m for m, ok in [("SARIMAX", STATSMODELS_OK), ("Prophet", PROPHET_OK), ("TBATS", TBATS_OK)] if ok]
+            available_models = [m for m, ok in [
+                ("SARIMAX", STATSMODELS_OK), 
+                ("Prophet", PROPHET_OK), 
+                ("TBATS", TBATS_OK),
+                ("XGBoost", XGBOOST_OK),
+                ("LightGBM", LIGHTGBM_OK)
+            ] if ok]
             model_choice = st.selectbox("🤖 Modelo", available_models)
         with c7:
             use_returns = st.checkbox("Usar retornos (en lugar de precios)", value=False,
@@ -536,6 +643,7 @@ def page_forecast():
         # Inicializar variables por defecto
         p, d, q, P, D, Q, S = 1, 1, 1, 0, 0, 0, 0
         seasonal_periods = []
+        ml_lags = 5
 
         # Parámetros específicos según modelo
         if model_choice == "SARIMAX":
@@ -551,11 +659,14 @@ def page_forecast():
                 with sc7: S = st.number_input("s", 0, 52, 0)
         elif model_choice == "TBATS":
             with st.expander("🔧 Parámetros TBATS (Frecuencias Estacionales)"):
-                st.info("ℹ️ TBATS es un modelo puramente univariado. Las variables exógenas serán ignoradas para el pronóstico estadístico.")
+                st.info("ℹ️ TBATS es un modelo puramente univariado. Las exógenas serán ignoradas para el pronóstico estadístico.")
                 ts1, ts2 = st.columns(2)
                 with ts1: tbats_s1 = st.number_input("Estacionalidad 1 (ej: 5 días laborables)", 0, 365, 5)
                 with ts2: tbats_s2 = st.number_input("Estacionalidad 2 (ej: 21 días al mes)", 0, 365, 21)
                 seasonal_periods = [s for s in [tbats_s1, tbats_s2] if s > 0]
+        elif model_choice in ["XGBoost", "LightGBM"]:
+            with st.expander(f"🔧 Parámetros {model_choice} (Machine Learning)"):
+                ml_lags = st.number_input("Número de rezagos (lags) a utilizar como variables", min_value=1, max_value=60, value=5)
 
         run_granger  = st.checkbox("🧪 Ejecutar prueba de causalidad de Granger", value=True)
         max_lag_gr   = st.number_input("   Lags máximos Granger", 1, 10, 5) if run_granger else 5
@@ -661,13 +772,11 @@ def page_forecast():
     with st.spinner(f"Ajustando {model_choice} (esto puede tardar unos segundos)..."):
         try:
             if model_choice == "SARIMAX":
-                result = run_sarimax(
-                    target_series, exog_df,
-                    order=(p, d, q), seasonal_order=(P, D, Q, S),
-                    horizon=horizon
-                )
+                result = run_sarimax(target_series, exog_df, order=(p, d, q), seasonal_order=(P, D, Q, S), horizon=horizon)
             elif model_choice == "TBATS":
                 result = run_tbats(target_series, horizon=horizon, seasonal_periods=seasonal_periods)
+            elif model_choice in ["XGBoost", "LightGBM"]:
+                result = run_ml_forecaster(target_series, exog_df, horizon=horizon, lags=ml_lags, model_type=model_choice)
             else:
                 result = run_prophet(target_series, exog_df, horizon=horizon)
         except Exception as e:
@@ -678,9 +787,7 @@ def page_forecast():
     # ── Métricas ─────────────────────────────────────────────────────────
     m = result["metrics"]
     mc1, mc2, mc3 = st.columns(3)
-    for box, lbl, val in zip([mc1, mc2, mc3],
-                              ["MAE", "RMSE", "AIC"],
-                              [m["MAE"], m["RMSE"], m["AIC"]]):
+    for box, lbl, val in zip([mc1, mc2, mc3], ["MAE", "RMSE", "AIC"], [m["MAE"], m["RMSE"], m["AIC"]]):
         with box:
             st.markdown(f"""
             <div class="metric-box">
@@ -696,8 +803,8 @@ def page_forecast():
         fc_df = pd.DataFrame({
             "Fecha": result["forecast"].index,
             "Pronóstico": result["forecast"].values.round(4),
-            "IC inferior (95%)": result["ci_lower"].values.round(4),
-            "IC superior (95%)": result["ci_upper"].values.round(4),
+            "IC inferior": result["ci_lower"].values.round(4),
+            "IC superior": result["ci_upper"].values.round(4),
         })
         st.dataframe(fc_df, use_container_width=True, hide_index=True)
 
@@ -706,7 +813,7 @@ def page_forecast():
                            file_name=f"forecast_{target_col}.csv", mime="text/csv")
 
     # ── Resumen Modelo ──────────────────────────────────────────────────
-    if model_choice in ["SARIMAX", "TBATS"]:
+    if model_choice in ["SARIMAX", "TBATS", "XGBoost", "LightGBM"]:
         with st.expander(f"📜 Resumen estadístico {model_choice}"):
             st.text(result["summary"])
 
