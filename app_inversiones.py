@@ -87,7 +87,16 @@ def get_gsheets_client():
         ]
         creds_dict = dict(st.secrets["gcp_service_account"])
         if "private_key" in creds_dict:
-            creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
+            pk = creds_dict["private_key"]
+            # Caso 1: clave con \n literales (formato una línea desde JSON)
+            pk = pk.replace("\\n", "\n")
+            # Caso 2: clave multilínea con saltos reales (formato """ de TOML)
+            # Reconstruir eliminando espacios extra por indentación TOML
+            if "\n" in pk and "\\n" not in creds_dict["private_key"]:
+                lines = pk.splitlines()
+                cleaned = "\n".join(line.strip() for line in lines if line.strip())
+                pk = cleaned + "\n"
+            creds_dict["private_key"] = pk
 
         creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
         client = gspread.authorize(creds)
