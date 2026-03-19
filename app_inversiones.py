@@ -629,6 +629,188 @@ def page_fixed_income():
     st.info("Módulo Renta Fija sin cambios — pegar el código original de page_fixed_income() aquí.")
 
 
+def page_fixed_income():
+    st.title("🏛️ Renta Fija: Análisis, Sensibilidad e Inmunización")
+    st.markdown("Ingresa tu cartera de bonos para calcular duración, medir el riesgo frente a cambios en las tasas y evaluar la inmunización del portafolio.")
+    
+    st.subheader("Configuración de Cartera")
+    rf_mode = st.radio("Método de Ingreso de Datos", ["✍️ Carga Manual", "🏦 Importar Precios desde IOL"], horizontal=True)
+    
+    if rf_mode == "🏦 Importar Precios desde IOL":
+        c_iol1, c_iol2 = st.columns([3, 1])
+        iol_tickers = c_iol1.text_input("Tickers a Importar (ej. AL30, GD30, TX26)")
+        if c_iol2.button("⬇️ Consultar IOL"):
+            client = get_iol_client()
+            if not client or not st.session_state.get('iol_username'):
+                st.error("⚠️ Conéctate a IOL en la barra lateral primero.")
+            else:
+                tickers_list = [t.strip().upper() for t in iol_tickers.split(",") if t.strip()]
+                fetched_bonds = []
+                with st.spinner("Buscando cotizaciones en IOL..."):
+                    for t in tickers_list:
+                        try:
+                            # Obtenemos el último precio para referencia
+                            start_d = (pd.to_datetime("today") - pd.Timedelta(days=7)).strftime("%Y-%m-%d")
+                            end_d = pd.to_datetime("today").strftime("%Y-%m-%d")
+                            df_hist = client.get_serie_historica(t, start_d, end_d)
+                            if not df_hist.empty and "ultimoPrecio" in df_hist.columns:
+                                last_price = df_hist["ultimoPrecio"].iloc[-1]
+                                fetched_bonds.append({
+                                    "Bono": t,
+                                    "Cupón (%)": 5.0,
+                                    "YTM (%)": 15.0,
+                                    "Años a Venc.": 3.0,
+                                    "Nominal Invertido": 10000
+                                })
+                        except Exception as e:
+                            st.warning(f"No se pudo obtener {t}: {e}")
+                
+                if fetched_bonds:
+                    st.session_state.bonds_data = pd.DataFrame(fetched_bonds)
+                    st.success("✅ Tickers cargados. Ajusta el Cupón, YTM y Vencimiento manualmente.")
+
+    if 'bonds_data' not in st.session_state:
+        st.session_state.bonds_data = pd.DataFrame({
+            "Bono": ["Bono Corto", "Bono Medio", "Bono Largo"],
+            "Cupón (%)": [3.0, 4.5, 6.0],
+            "YTM (%)": [4.0, 5.0, 6.5],
+            "Años a Venc.": [2.0, 5.0, 10.0],
+            "Nominal Invertido": [100000, 150000, 50000]
+        })
+
+    # Editor de tabla dinámico
+    edited_bonds = st.data_editor(st.session_state.bonds_data, num_rows="dynamic", use_container_width=True)
+    st.session_state.bonds_data = edited_bonds
+
+    tabs = st.tabs(["📊 Análisis e Inmunización", "📉 Sensibilidad (Test de Estrés)", "📈 Curva de Rendimiento", "💬 Chat IA Especializado"])
+
+    results = []
+    total_investment = 0
+    port_mac_dur, port_mod_dur, port_convexity = 0, 0, 0
+    
+    # Cálculos iterativos por cada bono
+    for _, row in edited_bonds.iterrows():
+        try:
+            # Usamos la función calc_bond_metrics definida arriba en el core
+            p, macd, modd, conv = calc_bond_metrics(
+                face_value=100, 
+                coupon_rate=row["Cupón (%)"]/100, 
+                ytm=row["YTM (%)"]/100, 
+                years_to_maturity=row["Años a Venc."]
+            )
+            weight = row["Nominal Invertido"]
+            total_investment += weight
+            results.append({
+                "Bono": row["Bono"], 
+                "Precio Calc.": p, 
+                "Mac. Dur": macd, 
+                "Mod. Dur": modd, 
+                "Convexidad": conv, 
+                "Peso $": weight
+            })
+        except Exception as e:
+            pass
+
+    if total_investment > 0 and results:
+        df_res = pd.DataFrame(results)
+        df_res["Peso %"] = df_res["Peso $"] / total_investment
+        
+        # Métricas ponderadas del portafolio
+        port_mac_dur = (df_res["Mac. Dur"] * df_res["Peso %"]).sum()
+        port_mod_dur = (df_res["Mod. Dur"] * df_res["Peso %"]).sum()
+        port_convexity = (df_res["Convexidad"] * df_res["Peso %"]).sum()
+
+        with tabs[0]:
+            st.subheader("Métricas de Riesgo del Portafolio de Bonos")
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Macaulay Duration (Años)", f"{port_mac_dur:.2f}")
+            c2.metric("Modified Duration", f"{port_mod_dur:.2f}")
+            c3.metric("Convexidad Total", f"{port_convexity:.2f}")
+            
+            st.dataframe(df_res.style.format({
+                "Precio Calc.": "{:.2f}", 
+                "Mac. Dur": "{:.2f}", 
+                "Mod. Dur": "{:.2f}", 
+                "Convexidad": "{:.4f}",
+                "Peso %": "{:.2%}"
+            }), use_container_width=True)
+
+            st.markdown("---")
+            st.subheader("🛡️ Análisis de Inmunización")
+            horizonte = st.slider("Tu Horizonte de Inversión (Años)", 0.5, 20.0, 5.0, 0.5)
+            gap = port_mac_dur - horizonte
+            if abs(gap) < 0.25:
+                st.success(f"✅ Portafolio Inmunizado: La Duración Macaulay ({port_mac_dur:.2f}) coincide con tu horizonte.")
+            elif gap > 0:
+                st.warning(f"⚠️ Riesgo de Precio: La duración es mayor al horizonte. Una subida de tasas afectará el valor final.")
+            else:
+                st.info(f"ℹ️ Riesgo de Reinversión: La duración es menor al horizonte. Una caída de tasas reducirá los ingresos por reinversión.")
+
+        with tabs[1]:
+            st.subheader("Test de Estrés de Tasas (Aproximación Taylor)")
+            shock_bps = st.slider("Shock en Tasas (puntos básicos)", -500, 500, 100, 10)
+            shock_pct = shock_bps / 10000
+            
+            # Cálculo de impacto: -Dmod * dy + 0.5 * Conv * dy^2
+            df_res["Impacto %"] = (-df_res["Mod. Dur"] * shock_pct + 0.5 * df_res["Convexidad"] * (shock_pct**2)) * 100
+            port_impacto = (-port_mod_dur * shock_pct + 0.5 * port_convexity * (shock_pct**2)) * 100
+            
+            st.metric("Variación Estimada del Portafolio", f"{port_impacto:.2f}%", delta=f"{shock_bps} bps")
+            
+            fig_stress = px.bar(df_res, x="Bono", y="Impacto %", color="Impacto %", 
+                                title=f"Impacto por Activo ante shock de {shock_bps} bps",
+                                color_continuous_scale="RdYlGn")
+            st.plotly_chart(fig_stress, use_container_width=True)
+
+        with tabs[2]:
+            st.subheader("Estructura Temporal de Tasas (Curva del Portafolio)")
+            df_curve = edited_bonds.sort_values("Años a Venc.")
+            fig_curve = px.line(df_curve, x="Años a Venc.", y="YTM (%)", markers=True, text="Bono")
+            fig_curve.update_traces(textposition="top center")
+            fig_curve.update_layout(template="plotly_dark", yaxis_title="Yield (YTM %)", xaxis_title="Plazo (Años)")
+            st.plotly_chart(fig_curve, use_container_width=True)
+
+        with tabs[3]:
+            st.subheader("💬 Asistente IA Especialista en Renta Fija")
+            if not st.session_state.get('preferred_ai'):
+                st.warning("⚠️ Configura una API Key en el menú lateral.")
+            else:
+                # Contexto técnico para la IA
+                bond_context = f"El usuario tiene un portafolio de bonos con Duración Modificada de {port_mod_dur:.2f} y Convexidad de {port_convexity:.2f}."
+                
+                if "bond_chat_history" not in st.session_state:
+                    st.session_state.bond_chat_history = []
+                
+                for m in st.session_state.bond_chat_history:
+                    st.chat_message(m["role"]).write(m["content"])
+                
+                if prompt := st.chat_input("Pregunta sobre tu estrategia de bonos..."):
+                    st.session_state.bond_chat_history.append({"role": "user", "content": prompt})
+                    st.chat_message("user").write(prompt)
+                    
+                    with st.spinner("Analizando..."):
+                        try:
+                            full_prompt = f"Contexto: {bond_context}. Pregunta: {prompt}"
+                            if st.session_state.preferred_ai == "OpenAI":
+                                client = OpenAI(api_key=st.session_state.openai_api_key)
+                                resp = client.chat.completions.create(
+                                    model=st.session_state.openai_model,
+                                    messages=[{"role": "user", "content": full_prompt}]
+                                )
+                                response_txt = resp.choices[0].message.content
+                            else:
+                                genai.configure(api_key=st.session_state.gemini_api_key)
+                                model = genai.GenerativeModel(st.session_state.gemini_model)
+                                response_txt = model.generate_content(full_prompt).text
+                            
+                            st.session_state.bond_chat_history.append({"role": "assistant", "content": response_txt})
+                            st.chat_message("assistant").write(response_txt)
+                        except Exception as e:
+                            st.error(f"Error IA: {e}")
+    else:
+        st.info("Agregue bonos a la tabla para ver el análisis de riesgo.")
+
+
 def page_yahoo_explorer():
     st.title("🌎 Explorador de Mercado (Yahoo Finance)")
     c1, c2, c3 = st.columns([1, 1, 2])
