@@ -623,11 +623,6 @@ def page_corporate_dashboard():
                 st.plotly_chart(fig, use_container_width=True)
 
 
-def page_fixed_income():
-    st.title("🏛️ Renta Fija: Análisis, Sensibilidad e Inmunización")
-    # ... (sin cambios respecto al original)
-    st.info("Módulo Renta Fija sin cambios — pegar el código original de page_fixed_income() aquí.")
-
 
 def page_fixed_income():
     st.title("🏛️ Renta Fija: Análisis, Sensibilidad e Inmunización")
