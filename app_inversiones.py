@@ -75,27 +75,38 @@ PORTFOLIO_FILE = "portfolios_data1.json"
 @st.cache_resource(show_spinner=False)
 def get_gsheets_client():
     """
-    Retorna un cliente gspread autenticado via Service Account.
-    Solo usa scope de Sheets (no Drive) para evitar error 403.
-    Abre el Sheet por ID para no necesitar scope de Drive.
+    Autenticación via Service Account.
+    Acepta DOS formatos en secrets.toml:
+
+    FORMATO A (recomendado — pegar el JSON completo):
+        [google_sheets]
+        service_account_json = '''{ "type": "service_account", ... }''' 
+
+    FORMATO B (campos separados — legacy):
+        [gcp_service_account]
+        type = "service_account"
+        private_key = "..."
+        ...
     """
     if not GSHEETS_OK:
         return None
     try:
-        scopes = [
-            "https://www.googleapis.com/auth/spreadsheets",
-        ]
-        creds_dict = dict(st.secrets["gcp_service_account"])
-        if "private_key" in creds_dict:
-            pk = creds_dict["private_key"]
-            # Caso 1: clave con \n literales (formato una línea desde JSON)
+        scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+
+        # ── FORMATO A: JSON completo en un solo campo ──────────────────
+        raw_json = st.secrets.get("google_sheets", {}).get("service_account_json", "")
+        if raw_json:
+            creds_dict = json.loads(raw_json)
+        # ── FORMATO B: campos separados (fallback) ─────────────────────
+        else:
+            creds_dict = dict(st.secrets["gcp_service_account"])
+            pk = creds_dict.get("private_key", "")
+            # Reparar \n literales
             pk = pk.replace("\\n", "\n")
-            # Caso 2: clave multilínea con saltos reales (formato """ de TOML)
-            # Reconstruir eliminando espacios extra por indentación TOML
-            if "\n" in pk and "\\n" not in creds_dict["private_key"]:
-                lines = pk.splitlines()
-                cleaned = "\n".join(line.strip() for line in lines if line.strip())
-                pk = cleaned + "\n"
+            # Reparar multilínea TOML: limpiar espacios y reconstruir
+            lines = pk.splitlines()
+            cleaned_lines = [l.strip() for l in lines if l.strip()]
+            pk = "\n".join(cleaned_lines) + "\n"
             creds_dict["private_key"] = pk
 
         creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
