@@ -1271,7 +1271,7 @@ sel = st.sidebar.radio("Navegación", opciones,
 if sel != st.session_state.selected_page: st.session_state.selected_page = sel; st.rerun()
 
 if sel == "Inicio":
-    st.title("BPNos - Finanzas Corporativas")
+    st.title("INVERSIONES- Finanzas Corporativas")
     st.info("Seleccione un módulo en la barra lateral.")
 elif sel == "📊 Dashboard Corporativo": page_corporate_dashboard()
 elif sel == "🏛️ Renta Fija (Bonos y Curvas)": page_fixed_income()
