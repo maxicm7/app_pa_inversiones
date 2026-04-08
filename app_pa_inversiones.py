@@ -10,6 +10,7 @@ import plotly.graph_objects as go
 from scipy.optimize import minimize
 from scipy.stats import norm
 import yfinance as yf
+from io import StringIO, BytesIO
 
 # ── IMPORTACIÓN SEGURA DE GOOGLE SHEETS ──────────────────────────────────
 try:
@@ -41,6 +42,19 @@ try:
 except ImportError:
     PYPFOPT_OK = False
 
+# ── Dependencias para procesamiento de documentos ──
+try:
+    from PyPDF2 import PdfReader
+    PDF_OK = True
+except ImportError:
+    PDF_OK = False
+
+try:
+    from docx import Document
+    DOCX_OK = True
+except ImportError:
+    DOCX_OK = False
+
 # ── Módulos propios (Manejo de errores si no existen) ──
 try:
     from forecast_module import page_forecast
@@ -51,44 +65,221 @@ except ImportError:
     def get_iol_client(): return None
 
 # ── Configuración Global ──────────────────────────────────────────────────
-st.set_page_config(layout="wide", page_title="BPNos – Finanzas Corporativas", page_icon="📈")
+st.set_page_config(layout="wide", page_title="INVERSIONES", page_icon="📈")
 
 # ───────────────────────────────────────────────────────────────────────────
-# NOMBRE DE LA HOJA — debe coincidir exactamente con el nombre del Google
-# Sheet que creaste y compartiste con el Service Account.
-# En secrets.toml: [google_sheets] / sheet_name = "BPNos_Portfolios"
+# CONFIGURACIÓN DE GOOGLE SHEETS
 # ───────────────────────────────────────────────────────────────────────────
 SHEET_NAME = st.secrets.get("google_sheets", {}).get("sheet_name", "Epre_Inversiones")
-# ID directo del Sheet — permite abrir sin scope de Drive
 SHEET_ID   = st.secrets.get("google_sheets", {}).get("sheet_id", "")
-
-# Nombre de la pestaña (worksheet) dentro del Google Sheet
 WORKSHEET_NAME = "portfolios"
-
-# Archivo JSON local (fallback si Google Sheets no está disponible)
 PORTFOLIO_FILE = "portfolios_data1.json"
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  CONEXIÓN A GOOGLE SHEETS
+#  FUNCIONES AUXILIARES: PROCESAMIENTO DE ARCHIVOS PARA IA
+# ═══════════════════════════════════════════════════════════════════════════
+
+def extract_text_from_file(uploaded_file, max_chars: int = 15000) -> str:
+    """
+    Extrae texto de archivos PDF, DOCX, CSV o TXT con límite de caracteres.
+    """
+    if uploaded_file is None:
+        return ""
+    
+    try:
+        file_type = uploaded_file.type
+        content = ""
+        
+        if file_type == "application/pdf" and PDF_OK:
+            reader = PdfReader(uploaded_file)
+            # Extraer primeras páginas para controlar tokens
+            pages_to_read = min(10, len(reader.pages))
+            for i in range(pages_to_read):
+                page_text = reader.pages[i].extract_text()
+                if page_text:
+                    content += page_text + "\n"
+                    
+        elif file_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document" and DOCX_OK:
+            doc = Document(uploaded_file)
+            content = "\n".join([para.text for para in doc.paragraphs])
+            
+        elif file_type == "text/csv":
+            df = pd.read_csv(uploaded_file)
+            # Convertir a formato legible para IA
+            content = df.head(50).to_markdown(index=False)
+            
+        elif file_type in ["text/plain", "text/markdown"]:
+            content = uploaded_file.getvalue().decode("utf-8", errors="ignore")
+            
+        else:
+            # Fallback: intentar leer como texto plano
+            content = uploaded_file.getvalue().decode("utf-8", errors="ignore")[:max_chars]
+        
+        # Truncar si excede el límite
+        if len(content) > max_chars:
+            content = content[:max_chars] + "\n\n[...contenido truncado por límite de tokens...]"
+            
+        return content.strip()
+        
+    except Exception as e:
+        st.error(f"⚠️ Error al procesar el archivo: {type(e).__name__}: {e}")
+        return ""
+
+
+def truncate_for_tokens(text: str, max_tokens: int = 8000) -> str:
+    """
+    Trunca texto estimando ~4 caracteres por token (aproximación conservadora).
+    """
+    if len(text) <= max_tokens * 4:
+        return text
+    # Mantener inicio y final para contexto
+    chunk = max_tokens * 2
+    return text[:chunk] + "\n\n[...resumen intermedio omitido...]\n\n" + text[-chunk:]
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  FUNCIÓN MEJORADA: CONSTRUCCIÓN DE CONTEXTO PARA ANÁLISIS DE PORTAFOLIO
+# ═══════════════════════════════════════════════════════════════════════════
+
+def build_portfolio_context(res: dict, prices: pd.DataFrame = None, 
+                           portfolio_name: str = "Portafolio",
+                           include_correlations: bool = True) -> str:
+    """
+    Construye un prompt enriquecido con TODA la información relevante del portafolio.
+    Incluye: pesos, métricas individuales, correlaciones, exposición implícita.
+    """
+    lines = []
+    
+    # 1. Encabezado
+    lines.append(f"📊 ANÁLISIS DE PORTAFOLIO: {portfolio_name}")
+    lines.append(f"Generado el: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M')}")
+    lines.append("")
+    
+    # 2. Métricas globales del portafolio
+    lines.append("🎯 MÉTRICAS GLOBALES:")
+    lines.append(f"- Retorno esperado anual: {res['expected_return']:.2%}")
+    lines.append(f"- Volatilidad anualizada: {res['volatility']:.2%}")
+    lines.append(f"- Ratio Sharpe (RF={0.02:.1%}): {res['sharpe_ratio']:.2f}")
+    lines.append(f"- Método de optimización: {res.get('method', 'N/A')}")
+    lines.append("")
+    
+    # 3. Composición DETALLADA con pesos (¡CRÍTICO!)
+    lines.append("🧩 COMPOSICIÓN DEL PORTAFOLIO (Pesos Reales):")
+    active_assets = [(t, w) for t, w in zip(res['tickers'], res['weights']) if w > 0.001]
+    
+    # Ordenar por peso descendente
+    active_assets.sort(key=lambda x: x[1], reverse=True)
+    
+    total_weight = sum(w for _, w in active_assets)
+    for ticker, weight in active_assets:
+        pct = weight / total_weight * 100 if total_weight > 0 else 0
+        lines.append(f"- {ticker:<10} : {pct:5.1f}%  (peso: {weight:.4f})")
+    
+    # Verificar concentración
+    if active_assets:
+        top_weight = active_assets[0][1] / total_weight if total_weight > 0 else 0
+        if top_weight > 0.4:
+            lines.append(f"  ⚠️ ALERTA: Concentración alta en {active_assets[0][0]} ({top_weight:.1%})")
+    lines.append("")
+    
+    # 4. Métricas individuales por activo (si hay precios históricos)
+    if prices is not None and not prices.empty and len(prices) >= 30:
+        returns = prices.pct_change().dropna()
+        lines.append("📈 MÉTRICAS INDIVIDUALES (histórico):")
+        
+        for ticker, weight in active_assets:
+            if ticker in prices.columns and ticker in returns.columns:
+                ann_ret = returns[ticker].mean() * 252
+                ann_vol = returns[ticker].std() * np.sqrt(252)
+                sharpe_ind = (ann_ret - 0.02) / ann_vol if ann_vol > 0 else 0
+                # Downside risk (simplificado)
+                neg_rets = returns[ticker][returns[ticker] < 0]
+                downside = neg_rets.std() * np.sqrt(252) if len(neg_rets) > 5 else ann_vol
+                
+                lines.append(f"- {ticker}:")
+                lines.append(f"    • Retorno: {ann_ret:6.1%} | Vol: {ann_vol:5.1%} | Sharpe: {sharpe_ind:5.2f}")
+                lines.append(f"    • Downside Vol: {downside:5.1%} | Peso en portafolio: {weight/total_weight:.1%}")
+        lines.append("")
+    
+    # 5. Matriz de correlaciones (solo si hay múltiples activos)
+    if include_correlations and prices is not None and len(prices.columns) >= 2:
+        returns = prices.pct_change().dropna()
+        if len(returns) >= 30:
+            corr = returns.corr()
+            high_corr_pairs = []
+            
+            # Identificar correlaciones altas (>0.7 o <-0.5)
+            for i, col in enumerate(corr.columns):
+                for j, idx in enumerate(corr.index):
+                    if i < j and col in active_assets and idx in active_assets:
+                        c_val = corr.loc[idx, col]
+                        if abs(c_val) > 0.65:
+                            high_corr_pairs.append((idx, col, c_val))
+            
+            if high_corr_pairs:
+                lines.append("🔗 CORRELACIONES SIGNIFICATIVAS (pueden reducir diversificación):")
+                for asset1, asset2, corr_val in high_corr_pairs:
+                    w1 = next((w for t, w in active_assets if t == asset1), 0)
+                    w2 = next((w for t, w in active_assets if t == asset2), 0)
+                    combined_weight = (w1 + w2) / total_weight if total_weight > 0 else 0
+                    signal = "🔴" if corr_val > 0.8 else "🟡" if corr_val > 0.65 else "🟢"
+                    lines.append(f"  {signal} {asset1} ↔ {asset2}: {corr_val:+.2f}  (peso combinado: {combined_weight:.1%})")
+                lines.append("")
+    
+    # 6. Análisis de exposición implícita (heurística por naming convention)
+    lines.append("🌍 EXPOSICIÓN IMPLÍCITA (estimada por ticker):")
+    exposures = {"ARS": 0, "USD": 0, "Equity": 0, "FixedIncome": 0, "Other": 0}
+    
+    for ticker, weight in active_assets:
+        t_upper = ticker.upper()
+        # Heurística simple para mercados emergentes/latam
+        if any(x in t_upper for x in ["AL30", "GD30", "GGAL", "YPF", "PAM", "TX26", "CEPU", "AR"]) and ".BA" not in t_upper:
+            exposures["ARS"] += weight
+            exposures["Equity"] += weight if any(x in t_upper for x in ["GGAL", "YPF", "PAM", "CEPU"]) else 0
+            exposures["FixedIncome"] += weight if any(x in t_upper for x in ["AL30", "GD30", "TX26"]) else 0
+        elif "=X" in t_upper or any(x in t_upper for x in ["USD", "EUR", "BRL"]):
+            exposures["USD"] += weight
+        elif any(x in t_upper for x in ["AAPL", "GOOGL", "MSFT", "SPY", "QQQ", ".US"]):
+            exposures["USD"] += weight
+            exposures["Equity"] += weight
+        else:
+            exposures["Other"] += weight
+    
+    for exp_type, exp_weight in exposures.items():
+        if exp_weight > 0.01:
+            pct = exp_weight / total_weight * 100 if total_weight > 0 else 0
+            lines.append(f"- {exp_type}: {pct:.1f}%")
+    
+    # Alerta de concentración geográfica
+    if exposures["ARS"] / total_weight > 0.7 if total_weight > 0 else False:
+        lines.append("  ⚠️ ALERTA: Alta exposición a Argentina (riesgo país/moneda)")
+    
+    lines.append("")
+    
+    # 7. Resumen estadístico del histórico de precios
+    if prices is not None and not prices.empty:
+        lines.append(f"📊 DATOS HISTÓRICOS: {len(prices)} observaciones | "
+                    f"Período: {prices.index.min().date()} a {prices.index.max().date()}")
+        missing_data = prices.isna().sum().sum()
+        if missing_data > 0:
+            lines.append(f"  ⚠️ {missing_data} valores faltantes imputados")
+    
+    return "\n".join(lines)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  CONEXIÓN A GOOGLE SHEETS (sin cambios)
 # ═══════════════════════════════════════════════════════════════════════════
 
 @st.cache_resource(show_spinner=False)
 def get_gsheets_client():
-    """
-    Retorna un cliente gspread autenticado via Service Account.
-    Solo usa scope de Sheets (no Drive) para evitar error 403.
-    Abre el Sheet por ID para no necesitar scope de Drive.
-    """
     if not GSHEETS_OK:
         return None
     try:
-        scopes = [
-            "https://www.googleapis.com/auth/spreadsheets",
-        ]
+        scopes = ["https://www.googleapis.com/auth/spreadsheets"]
         creds_dict = dict(st.secrets["gcp_service_account"])
         if "private_key" in creds_dict:
             creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
-
         creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
         client = gspread.authorize(creds)
         return client
@@ -98,21 +289,13 @@ def get_gsheets_client():
 
 
 def get_or_create_worksheet(client, sheet_name: str, worksheet_name: str):
-    """
-    Abre el Sheet por ID (open_by_key) — no necesita scope de Drive.
-    Solo crea la pestaña si no existe.
-    """
     try:
         if SHEET_ID:
             spreadsheet = client.open_by_key(SHEET_ID)
         else:
             spreadsheet = client.open(sheet_name)
     except Exception as e:
-        st.error(
-            f"❌ No se pudo abrir el Sheet. "
-            f"Verificá el sheet_id en Secrets y que esté compartido con el Service Account. "
-            f"Detalle: {e}"
-        )
+        st.error(f"❌ No se pudo abrir el Sheet. Verificá el sheet_id y permisos. Detalle: {e}")
         raise
 
     try:
@@ -120,28 +303,20 @@ def get_or_create_worksheet(client, sheet_name: str, worksheet_name: str):
     except gspread.WorksheetNotFound:
         worksheet = spreadsheet.add_worksheet(title=worksheet_name, rows=200, cols=3)
         worksheet.append_row(["name", "tickers", "weights"])
-
     return worksheet
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  GESTIÓN DE DATOS Y PORTAFOLIOS — GOOGLE SHEETS COMO BACKEND
+#  GESTIÓN DE PORTAFOLIOS — GOOGLE SHEETS + FALLBACK LOCAL
 # ═══════════════════════════════════════════════════════════════════════════
 
 def load_portfolios_from_gsheet() -> dict:
-    """
-    Lee todos los portafolios desde Google Sheets.
-    Columnas esperadas: name | tickers (CSV) | weights (CSV)
-    Devuelve dict con la misma estructura que antes:
-      { "Nombre": {"tickers": [...], "weights": [...]} }
-    """
     client = get_gsheets_client()
     if client is None:
         return _load_portfolios_local_fallback()
-
     try:
         ws = get_or_create_worksheet(client, SHEET_NAME, WORKSHEET_NAME)
-        records = ws.get_all_records()  # lista de dicts usando fila 1 como cabecera
+        records = ws.get_all_records()
         portfolios = {}
         for row in records:
             name = str(row.get("name", "")).strip()
@@ -154,6 +329,10 @@ def load_portfolios_from_gsheet() -> dict:
                 weights = [float(w.strip()) for w in raw_weights.split(",") if w.strip()]
             except ValueError:
                 weights = [1.0 / len(tickers)] * len(tickers)
+            # Normalizar pesos por si no suman exactamente 1
+            total_w = sum(weights)
+            if total_w > 0 and abs(total_w - 1.0) > 0.01:
+                weights = [w / total_w for w in weights]
             portfolios[name] = {"tickers": tickers, "weights": weights}
         return portfolios
     except Exception as e:
@@ -162,16 +341,11 @@ def load_portfolios_from_gsheet() -> dict:
 
 
 def save_portfolios_to_gsheet(portfolios_dict: dict) -> tuple[bool, str]:
-    """
-    Reescribe completamente la hoja con los portafolios actuales.
-    """
     client = get_gsheets_client()
     if client is None:
         return _save_portfolios_local_fallback(portfolios_dict)
-
     try:
         ws = get_or_create_worksheet(client, SHEET_NAME, WORKSHEET_NAME)
-        # Limpiar todo y reescribir
         ws.clear()
         rows = [["name", "tickers", "weights"]]
         for name, data in portfolios_dict.items():
@@ -179,15 +353,12 @@ def save_portfolios_to_gsheet(portfolios_dict: dict) -> tuple[bool, str]:
             weights_str = ", ".join(str(w) for w in data["weights"])
             rows.append([name, tickers_str, weights_str])
         ws.update(rows, "A1")
-        # También guardamos local como respaldo
         _save_portfolios_local_fallback(portfolios_dict)
         return True, ""
     except Exception as e:
         st.error(f"Error al guardar en Google Sheets: {e}")
         return _save_portfolios_local_fallback(portfolios_dict)
 
-
-# ── Fallbacks locales (mantiene compatibilidad si Sheets no está disponible) ──
 
 def _load_portfolios_local_fallback() -> dict:
     if os.path.exists(PORTFOLIO_FILE):
@@ -208,8 +379,6 @@ def _save_portfolios_local_fallback(portfolios_dict: dict) -> tuple[bool, str]:
         return False, str(e)
 
 
-# ── Funciones públicas (reemplazan las anteriores sin cambiar el resto del código) ──
-
 def load_portfolios_from_file() -> dict:
     return load_portfolios_from_gsheet()
 
@@ -219,8 +388,9 @@ def save_portfolios_to_file(portfolios_dict: dict) -> tuple[bool, str]:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  CORE FINANCIERO: DESCARGA Y OPTIMIZACIÓN  (sin cambios)
+#  CORE FINANCIERO: DESCARGA Y OPTIMIZACIÓN
 # ═══════════════════════════════════════════════════════════════════════════
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_stock_prices_for_portfolio(tickers, start_date, end_date):
     client = get_iol_client()
@@ -361,11 +531,10 @@ def calc_bond_metrics(face_value, coupon_rate, ytm, years_to_maturity, freq=2):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  ESTADO DEL SIDEBAR — INDICADOR DE CONEXIÓN GOOGLE SHEETS
+#  ESTADO DEL SIDEBAR
 # ═══════════════════════════════════════════════════════════════════════════
 
 def render_gsheets_status():
-    """Muestra en el sidebar si la conexión a Google Sheets está activa."""
     client = get_gsheets_client()
     if client:
         st.sidebar.success(f"🟢 Google Sheets: {SHEET_NAME}")
@@ -374,12 +543,12 @@ def render_gsheets_status():
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  PÁGINAS DE LA APLICACIÓN  (sin cambios internos)
+#  PÁGINAS DE LA APLICACIÓN
 # ═══════════════════════════════════════════════════════════════════════════
 
 def page_corporate_dashboard():
     st.title("📊 Dashboard Corporativo Integral")
-    tabs = st.tabs(["💼 Gestión de Portafolios", "🚀 Optimización & Riesgo", "🔮 Forecast & Simulación"])
+    tabs = st.tabs(["💼 Gestión de Portafolios", "🚀 Optimización & Riesgo con 🔮 Forecast & Simulación"])
 
     with tabs[0]:
         c1, c2 = st.columns([1, 1.5])
@@ -399,6 +568,9 @@ def page_corporate_dashboard():
                         if not p_name:
                             st.error("El nombre no puede estar vacío.")
                         elif len(t) == len(w) and abs(sum(w)-1.0) < 0.02:
+                            # Normalizar pesos
+                            total_w = sum(w)
+                            w = [weight/total_w for weight in w]
                             st.session_state.portfolios[p_name] = {"tickers": t, "weights": w}
                             ok, err = save_portfolios_to_file(st.session_state.portfolios)
                             if ok:
@@ -417,7 +589,7 @@ def page_corporate_dashboard():
                     curr_data = st.session_state.portfolios[edit_sel]
                     new_name = st.text_input("Renombrar Cartera", value=edit_sel)
                     new_tickers = st.text_area("Modificar Tickers", value=", ".join(curr_data["tickers"])).upper()
-                    new_weights = st.text_area("Modificar Pesos", value=", ".join(map(str, curr_data["weights"])))
+                    new_weights = st.text_area("Modificar Pesos", value=", ".join(f"{w:.4f}" for w in curr_data["weights"]))
 
                     col_b1, col_b2 = st.columns(2)
                     if col_b1.button("🔄 Actualizar", type="primary", use_container_width=True):
@@ -425,6 +597,8 @@ def page_corporate_dashboard():
                             t = [x.strip() for x in new_tickers.split(",") if x.strip()]
                             w = [float(x) for x in new_weights.split(",") if x.strip()]
                             if len(t) == len(w) and abs(sum(w)-1.0) < 0.02:
+                                total_w = sum(w)
+                                w = [weight/total_w for weight in w]
                                 if new_name != edit_sel:
                                     del st.session_state.portfolios[edit_sel]
                                 st.session_state.portfolios[new_name] = {"tickers": t, "weights": w}
@@ -536,6 +710,8 @@ def page_corporate_dashboard():
                 res = optimize_portfolio_corporate(prices, risk_free_rate=risk_free, opt_type=target)
                 if res:
                     st.session_state['last_opt_res'] = res
+                    st.session_state['last_opt_prices'] = prices  # Guardar precios para contexto IA
+                    st.session_state['last_opt_portfolio_name'] = p_sel
                     c_kpi1, c_kpi2, c_kpi3 = st.columns(3)
                     c_kpi1.metric("Retorno Esperado", f"{res['expected_return']:.1%}")
                     c_kpi2.metric("Volatilidad Anual", f"{res['volatility']:.1%}")
@@ -548,6 +724,9 @@ def page_corporate_dashboard():
                 else: st.error("Error al optimizar.")
             else: st.error("Error en datos.")
 
+        # ═══════════════════════════════════════════════════════════════
+        #  🧠 ANÁLISIS CON IA MEJORADO (LEE PESOS + CONTEXTO ENRIQUECIDO)
+        # ═══════════════════════════════════════════════════════════════
         if 'last_opt_res' in st.session_state:
             st.markdown("---")
             if st.button("🧠 Analizar Portafolio con IA"):
@@ -556,24 +735,68 @@ def page_corporate_dashboard():
                 else:
                     with st.spinner(f"Consultando IA ({st.session_state.preferred_ai})..."):
                         try:
-                            data_str = (f"Retorno: {st.session_state['last_opt_res']['expected_return']:.2f}, "
-                                        f"Volatilidad: {st.session_state['last_opt_res']['volatility']:.2f}. "
-                                        f"Activos: {st.session_state['last_opt_res']['tickers']}.")
-                            prompt = f"Actúa como asesor financiero institucional. Analiza este portafolio: {data_str}. ¿Cuáles son los riesgos y fortalezas?"
+                            res = st.session_state['last_opt_res']
+                            prices_ctx = st.session_state.get('last_opt_prices')
+                            portfolio_name = st.session_state.get('last_opt_portfolio_name', 'Portafolio')
+                            
+                            # Construir contexto enriquecido CON PESOS REALES
+                            context = build_portfolio_context(
+                                res=res, 
+                                prices=prices_ctx, 
+                                portfolio_name=portfolio_name,
+                                include_correlations=True
+                            )
+                            
+                            prompt = f"""Actúa como asesor financiero institucional senior especializado en mercados emergentes.
+
+CONTEXTO TÉCNICO DEL PORTAFOLIO:
+{context}
+
+TAREA DE ANÁLISIS:
+1️⃣ EVALUACIÓN DE DIVERSIFICACIÓN:
+   - ¿Los pesos asignados realmente diversifican el riesgo o hay concentración implícita?
+   - Analiza si las correlaciones altas entre activos con peso significativo anulan beneficios de diversificación
+
+2️⃣ IDENTIFICACIÓN DE RIESGOS:
+   - Riesgo país/moneda (ej: exposición a ARS, USD)
+   - Riesgo sectorial o de tipo de activo
+   - Riesgo de liquidez o concentración en pocos activos
+
+3️⃣ RECOMENDACIONES ACCIONABLES:
+   - Sugiere 2-3 ajustes concretos de pesos para mejorar ratio riesgo/retorno
+   - Menciona si faltan activos clave para el perfil de riesgo implícito
+   - Indica si la estrategia es consistente con perfil: conservador/moderado/agresivo
+
+4️⃣ ALERTAS CRÍTICAS (si aplican):
+   - Concentración >40% en un solo activo
+   - Correlación >0.8 entre activos con peso combinado >30%
+   - Exposición >70% a una sola moneda/país
+
+FORMATO DE RESPUESTA:
+- Usa viñetas claras y lenguaje profesional pero accesible
+- Incluye números/cifras cuando sea relevante
+- Evita recomendaciones genéricas; sé específico con los tickers del portafolio
+
+Responde en español."""
+                            
                             if st.session_state.preferred_ai == "OpenAI":
                                 client = OpenAI(api_key=st.session_state.openai_api_key)
                                 response = client.chat.completions.create(
                                     model=st.session_state.get('openai_model', 'gpt-4o'),
-                                    messages=[{"role": "user", "content": prompt}])
+                                    messages=[{"role": "user", "content": prompt}],
+                                    temperature=0.2)
                                 st.info(response.choices[0].message.content)
                             elif st.session_state.preferred_ai == "Gemini":
                                 genai.configure(api_key=st.session_state.gemini_api_key)
                                 model = genai.GenerativeModel(st.session_state.gemini_model)
-                                st.info(model.generate_content(prompt).text)
+                                response = model.generate_content(prompt, generation_config=genai.types.GenerationConfig(temperature=0.2))
+                                st.info(response.text)
+                                
                         except Exception as e:
-                            st.error(f"Error API IA: {e}")
+                            st.error(f"Error API IA: {type(e).__name__}: {e}")
+                            st.code(traceback.format_exc(), language="python")
 
-    with tabs[2]:
+        # Montecarlo (sin cambios)
         if 'last_opt_res' in st.session_state:
             res = st.session_state['last_opt_res']
             st.subheader("Simulación Montecarlo")
@@ -605,12 +828,6 @@ def page_corporate_dashboard():
 
 def page_fixed_income():
     st.title("🏛️ Renta Fija: Análisis, Sensibilidad e Inmunización")
-    # ... (sin cambios respecto al original)
-    st.info("Módulo Renta Fija sin cambios — pegar el código original de page_fixed_income() aquí.")
-
-
-def page_fixed_income():
-    st.title("🏛️ Renta Fija: Análisis, Sensibilidad e Inmunización")
     st.markdown("Ingresa tu cartera de bonos para calcular duración, medir el riesgo frente a cambios en las tasas y evaluar la inmunización del portafolio.")
     
     st.subheader("Configuración de Cartera")
@@ -629,7 +846,6 @@ def page_fixed_income():
                 with st.spinner("Buscando cotizaciones en IOL..."):
                     for t in tickers_list:
                         try:
-                            # Obtenemos el último precio para referencia
                             start_d = (pd.to_datetime("today") - pd.Timedelta(days=7)).strftime("%Y-%m-%d")
                             end_d = pd.to_datetime("today").strftime("%Y-%m-%d")
                             df_hist = client.get_serie_historica(t, start_d, end_d)
@@ -658,7 +874,6 @@ def page_fixed_income():
             "Nominal Invertido": [100000, 150000, 50000]
         })
 
-    # Editor de tabla dinámico
     edited_bonds = st.data_editor(st.session_state.bonds_data, num_rows="dynamic", use_container_width=True)
     st.session_state.bonds_data = edited_bonds
 
@@ -668,10 +883,8 @@ def page_fixed_income():
     total_investment = 0
     port_mac_dur, port_mod_dur, port_convexity = 0, 0, 0
     
-    # Cálculos iterativos por cada bono
     for _, row in edited_bonds.iterrows():
         try:
-            # Usamos la función calc_bond_metrics definida arriba en el core
             p, macd, modd, conv = calc_bond_metrics(
                 face_value=100, 
                 coupon_rate=row["Cupón (%)"]/100, 
@@ -694,8 +907,6 @@ def page_fixed_income():
     if total_investment > 0 and results:
         df_res = pd.DataFrame(results)
         df_res["Peso %"] = df_res["Peso $"] / total_investment
-        
-        # Métricas ponderadas del portafolio
         port_mac_dur = (df_res["Mac. Dur"] * df_res["Peso %"]).sum()
         port_mod_dur = (df_res["Mod. Dur"] * df_res["Peso %"]).sum()
         port_convexity = (df_res["Convexidad"] * df_res["Peso %"]).sum()
@@ -706,15 +917,10 @@ def page_fixed_income():
             c1.metric("Macaulay Duration (Años)", f"{port_mac_dur:.2f}")
             c2.metric("Modified Duration", f"{port_mod_dur:.2f}")
             c3.metric("Convexidad Total", f"{port_convexity:.2f}")
-            
             st.dataframe(df_res.style.format({
-                "Precio Calc.": "{:.2f}", 
-                "Mac. Dur": "{:.2f}", 
-                "Mod. Dur": "{:.2f}", 
-                "Convexidad": "{:.4f}",
-                "Peso %": "{:.2%}"
+                "Precio Calc.": "{:.2f}", "Mac. Dur": "{:.2f}", "Mod. Dur": "{:.2f}", 
+                "Convexidad": "{:.4f}", "Peso %": "{:.2%}"
             }), use_container_width=True)
-
             st.markdown("---")
             st.subheader("🛡️ Análisis de Inmunización")
             horizonte = st.slider("Tu Horizonte de Inversión (Años)", 0.5, 20.0, 5.0, 0.5)
@@ -730,13 +936,9 @@ def page_fixed_income():
             st.subheader("Test de Estrés de Tasas (Aproximación Taylor)")
             shock_bps = st.slider("Shock en Tasas (puntos básicos)", -500, 500, 100, 10)
             shock_pct = shock_bps / 10000
-            
-            # Cálculo de impacto: -Dmod * dy + 0.5 * Conv * dy^2
             df_res["Impacto %"] = (-df_res["Mod. Dur"] * shock_pct + 0.5 * df_res["Convexidad"] * (shock_pct**2)) * 100
             port_impacto = (-port_mod_dur * shock_pct + 0.5 * port_convexity * (shock_pct**2)) * 100
-            
             st.metric("Variación Estimada del Portafolio", f"{port_impacto:.2f}%", delta=f"{shock_bps} bps")
-            
             fig_stress = px.bar(df_res, x="Bono", y="Impacto %", color="Impacto %", 
                                 title=f"Impacto por Activo ante shock de {shock_bps} bps",
                                 color_continuous_scale="RdYlGn")
@@ -755,8 +957,19 @@ def page_fixed_income():
             if not st.session_state.get('preferred_ai'):
                 st.warning("⚠️ Configura una API Key en el menú lateral.")
             else:
-                # Contexto técnico para la IA
+                # 📎 UPLOAD DE ARCHIVOS PARA CONTEXTO ADICIONAL
+                uploaded_file = st.file_uploader(
+                    "📎 Adjuntar documento de contexto (PDF, CSV, DOCX, TXT)", 
+                    type=["pdf", "csv", "docx", "txt"],
+                    help="Ej: Reporte del BCRA, prospecto de bono, o datos históricos en CSV"
+                )
+                
                 bond_context = f"El usuario tiene un portafolio de bonos con Duración Modificada de {port_mod_dur:.2f} y Convexidad de {port_convexity:.2f}."
+                
+                if uploaded_file is not None:
+                    doc_text = extract_text_from_file(uploaded_file, max_chars=8000)
+                    if doc_text:
+                        bond_context += f"\n\n📄 CONTEXTO ADICIONAL DEL DOCUMENTO:\n{truncate_for_tokens(doc_text, max_tokens=2000)}"
                 
                 if "bond_chat_history" not in st.session_state:
                     st.session_state.bond_chat_history = []
@@ -824,11 +1037,46 @@ def page_event_analyzer():
     if not st.session_state.get('preferred_ai'):
         st.warning("⚠️ Configure una API Key en la barra lateral.")
         return
-    news_text = st.text_area("Pega la noticia aquí:", height=150)
+    
+    # 📎 UPLOAD DE ARCHIVOS
+    uploaded_file = st.file_uploader(
+        "📎 Adjuntar documento (PDF, CSV, DOCX, TXT) o pegar texto", 
+        type=["pdf", "csv", "docx", "txt", "md"]
+    )
+    
+    news_text = ""
+    if uploaded_file is not None:
+        news_text = extract_text_from_file(uploaded_file, max_chars=15000)
+        if news_text:
+            st.info(f"📄 Contenido extraído: {len(news_text)} caracteres")
+            with st.expander("👁️ Ver contenido extraído"):
+                st.text(news_text[:2000] + "..." if len(news_text) > 2000 else news_text)
+    
+    # Text area como fallback o complemento
+    manual_text = st.text_area("O pega la noticia/texto aquí:", value="", height=150)
+    if manual_text and not news_text:
+        news_text = manual_text
+    elif manual_text and news_text:
+        news_text = f"{news_text}\n\n---\n\nTexto adicional:\n{manual_text}"
+    
     if st.button("🤖 Analizar"):
+        if not news_text.strip():
+            st.warning("Por favor, adjunta un archivo o pega texto para analizar.")
+            return
         with st.spinner(f"Analizando con {st.session_state.preferred_ai}..."):
             try:
-                prompt = f"Analiza financieramente esta noticia:\n\n'{news_text}'"
+                prompt = f"""Actúa como analista financiero senior. Analiza el siguiente contenido:
+
+{truncate_for_tokens(news_text, max_tokens=4000)}
+
+Proporciona:
+1. Resumen ejecutivo (3-4 líneas)
+2. Impacto potencial en mercados/activos (positivo/negativo/neutral con justificación)
+3. Activos o sectores más expuestos según el contenido
+4. Recomendación de acción para un inversor institucional
+
+Responde en español, con viñetas claras."""
+                
                 if st.session_state.preferred_ai == "OpenAI":
                     client = OpenAI(api_key=st.session_state.openai_api_key)
                     response = client.chat.completions.create(
@@ -848,13 +1096,31 @@ def page_chat_general():
     if not st.session_state.get('preferred_ai'):
         st.warning("⚠️ Configure una API Key en la barra lateral.")
         return
+    
+    # 📎 UPLOAD OPCIONAL PARA CONTEXTO
+    with st.expander("📎 Adjuntar archivo de contexto (opcional)"):
+        uploaded_file = st.file_uploader("PDF, CSV, DOCX, TXT", type=["pdf", "csv", "docx", "txt", "md"])
+        context_text = ""
+        if uploaded_file is not None:
+            context_text = extract_text_from_file(uploaded_file, max_chars=10000)
+            if context_text:
+                st.success(f"✅ Archivo procesado ({len(context_text)} chars)")
+    
     if "general_messages" not in st.session_state:
         st.session_state.general_messages = []
+    
     for msg in st.session_state.general_messages:
         st.chat_message(msg["role"]).write(msg["content"])
+    
     if prompt := st.chat_input("Escribe tu consulta financiera..."):
-        st.session_state.general_messages.append({"role": "user", "content": prompt})
-        st.chat_message("user").write(prompt)
+        # Construir mensaje con contexto si existe
+        full_prompt = prompt
+        if context_text:
+            full_prompt = f"CONTEXTO ADJUNTO:\n{truncate_for_tokens(context_text, max_tokens=2000)}\n\nPREGUNTA: {prompt}"
+        
+        st.session_state.general_messages.append({"role": "user", "content": full_prompt})
+        st.chat_message("user").write(prompt)  # Mostrar solo el prompt original al usuario
+        
         try:
             if st.session_state.preferred_ai == "OpenAI":
                 client = OpenAI(api_key=st.session_state.openai_api_key)
@@ -866,7 +1132,8 @@ def page_chat_general():
                 model = genai.GenerativeModel(st.session_state.gemini_model)
                 hist = [{'role': ('user' if m['role']=='user' else 'model'), 'parts': [m['content']]} for m in st.session_state.general_messages[-10:-1]]
                 chat = model.start_chat(history=hist)
-                reply = chat.send_message(prompt).text
+                reply = chat.send_message(full_prompt).text
+            
             st.session_state.general_messages.append({"role": "assistant", "content": reply})
             st.chat_message("assistant").write(reply)
         except Exception as e:
@@ -878,15 +1145,34 @@ def page_ai_strategy_assistant():
     if not st.session_state.get('preferred_ai'):
         st.warning("⚠️ Configura una API Key en la barra lateral.")
         return
+    
+    # 📎 UPLOAD DE DATOS PERSONALIZADOS (CSV con series, matrices, etc.)
+    with st.expander("📊 Adjuntar datos personalizados (CSV)"):
+        uploaded_csv = st.file_uploader("CSV con series temporales, matrices de co-ocurrencia, etc.", type=["csv"])
+        custom_data_context = ""
+        if uploaded_csv is not None:
+            try:
+                df_custom = pd.read_csv(uploaded_csv)
+                custom_data_context = f"\n📊 DATOS PERSONALIZADOS ADJUNTOS:\n{df_custom.head(30).to_markdown(index=False)}"
+                if len(df_custom) > 30:
+                    custom_data_context += f"\n[...{len(df_custom)-30} filas adicionales omitidas para brevedad...]"
+                st.success(f"✅ CSV cargado: {df_custom.shape[0]} filas × {df_custom.shape[1]} columnas")
+            except Exception as e:
+                st.error(f"Error al leer CSV: {e}")
+    
     user_strategy_prompt = st.text_area("Describe tu estrategia de inversión:", height=120,
-        placeholder="Ej: 'Busco un portafolio conservador...'")
+        placeholder="Ej: 'Busco un portafolio conservador con exposición a bonos soberanos y acciones defensivas...'")
+    
     if st.button("Traducir Estrategia a Filtros", type="primary"):
         if not user_strategy_prompt:
             st.warning("Por favor, describe tu estrategia.")
         else:
             system_prompt = """Eres un experto en finanzas cuantitativas. Traduce la estrategia del usuario en JSON con estas claves exactas:
             k_assets, asset_allocation, beta_range, pe_range, duration_range, universe_stocks, universe_bonds.
-            Responde SOLO con el bloque JSON válido."""
+            Responde SOLO con el bloque JSON válido, sin texto adicional."""
+            
+            full_prompt = f"{system_prompt}\n\nEstrategia del usuario: {user_strategy_prompt}{custom_data_context}"
+            
             with st.spinner("IA Quant analizando..."):
                 try:
                     raw_response = ""
@@ -895,15 +1181,14 @@ def page_ai_strategy_assistant():
                         response = client.chat.completions.create(
                             model=st.session_state.openai_model,
                             messages=[{"role": "system", "content": system_prompt},
-                                      {"role": "user", "content": user_strategy_prompt}],
+                                      {"role": "user", "content": full_prompt}],
                             temperature=0.1)
                         raw_response = response.choices[0].message.content
                     elif st.session_state.preferred_ai == "Gemini":
                         genai.configure(api_key=st.session_state.gemini_api_key)
                         model = genai.GenerativeModel(st.session_state.gemini_model)
-                        raw_response = model.generate_content(
-                            f"{system_prompt}\n\n{user_strategy_prompt}",
-                            generation_config=genai.types.GenerationConfig(temperature=0.1)).text
+                        raw_response = model.generate_content(full_prompt, generation_config=genai.types.GenerationConfig(temperature=0.1)).text
+                    
                     if raw_response:
                         json_text = re.search(r'\{.*\}', raw_response, re.DOTALL)
                         if json_text:
@@ -917,8 +1202,12 @@ def page_ai_strategy_assistant():
                                 st.write(f"Duración: {suggested_params.get('duration_range')}")
                                 st.write("**Bonos:**", ", ".join(suggested_params.get("universe_bonds", [])))
                             st.code(json.dumps(suggested_params, indent=4), language="json")
+                        else:
+                            st.warning("⚠️ La IA no devolvió JSON válido. Respuesta raw:")
+                            st.code(raw_response)
                 except Exception as e:
                     st.error(f"Error: {str(e)}")
+                    st.code(traceback.format_exc(), language="python")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -929,8 +1218,6 @@ if 'selected_page' not in st.session_state: st.session_state.selected_page = "In
 if 'portfolios' not in st.session_state: st.session_state.portfolios = load_portfolios_from_file()
 
 st.sidebar.title("Configuración y Accesos")
-
-# ── Estado de conexión Google Sheets ────
 render_gsheets_status()
 st.sidebar.markdown("---")
 
