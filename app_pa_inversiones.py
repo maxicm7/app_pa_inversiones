@@ -804,7 +804,7 @@ def page_ai_strategy_assistant():
         strat = st.text_area("Describe tu estrategia:", height=120, placeholder="Ej: Portafolio conservador con bonos ARS y dividendos USA...")
         col1,col2,col3 = st.columns(3)
         risk = col1.select_slider("Riesgo", ["Conservador","Moderado","Agresivo","Muy Agresivo"], "Moderado")
-        hor = col2.selectbox("Horizonte", ["Corto","Mediano","Largo"], "Mediano")
+        hor = col2.selectbox("Horizonte", ["Corto","Mediano","Largo"], index=1)
         mkt = col3.multiselect("Mercados", ["Argentina","USA","Internacional","Emergentes"], ["USA"])
         
         if st.button(" Generar Estrategia", type="primary"):
