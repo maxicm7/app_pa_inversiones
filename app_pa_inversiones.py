@@ -876,7 +876,8 @@ Pesos deben sumar 1.0. Usa SOLO tickers de las listas."""
                                         st.success(f"✅ Guardado. Ve al Dashboard.")
                         with rt4:
                             st.download_button("📥 JSON", json.dumps(data, indent=4, ensure_ascii=False), f"strategy_{data.get('strategy_name','quant')}.json")
-                            if "portfolios" in 
+                            # FIX: Corrección de la condición incompleta
+                            if "portfolios" in data:
                                 rows = []
                                 for m, a in data["portfolios"].items():
                                     for x in a: rows.append({"Mercado":m,"Ticker":x["ticker"],"Peso":x["weight"],"Razón":x["reason"]})
@@ -925,9 +926,7 @@ st.sidebar.title("⚙️ Configuración")
 if get_gsheets_client(): st.sidebar.success("🟢 Google Sheets")
 else: st.sidebar.info("📁 Local")
 
-# ═══════════════════════════════════════════════════════════════════════════
-#  FIX: Añadidos 'key' únicos y etiquetas diferenciadas para evitar duplicados
-# ═══════════════════════════════════════════════════════════════════════════
+# FIX: Inputs con keys únicos para evitar StreamlitDuplicateElementId
 with st.sidebar.expander("🤖 IA (OpenAI)", expanded=True):
     st.session_state.openai_api_key = st.text_input("OpenAI API Key", type="password", value=st.session_state.get('openai_api_key',''), key="sk_openai")
     st.session_state.openai_model = st.selectbox("Modelo OpenAI", ["gpt-4o","gpt-4o-mini"], index=0, key="sel_openai_model")
