@@ -213,7 +213,9 @@ def build_portfolio_context(res: dict, prices: pd.DataFrame = None,
 
 @st.cache_resource(show_spinner=False)
 def get_gsheets_client():
-    if not GSHEETS_OK: return None
+    if not GSHEETS_OK: 
+        st.sidebar.error("Falta gspread en requirements.txt")
+        return None
     try:
         scopes = ["https://www.googleapis.com/auth/spreadsheets"]
         creds_dict = dict(st.secrets["gcp_service_account"])
@@ -221,7 +223,11 @@ def get_gsheets_client():
             creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
         creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
         return gspread.authorize(creds)
+    except KeyError:
+        st.sidebar.error("Falta [gcp_service_account] en los Secrets de Streamlit.")
+        return None
     except Exception as e:
+        st.sidebar.error(f"Error Google Sheets: {e}")
         return None
 
 def get_or_create_worksheet(client):
