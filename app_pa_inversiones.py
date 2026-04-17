@@ -110,7 +110,7 @@ def extract_text_from_file(uploaded_file, max_chars: int = 15000) -> str:
             content = uploaded_file.getvalue().decode("utf-8", errors="ignore")[:max_chars]
         
         if len(content) > max_chars:
-            content = content[:max_chars] + "\n\n[...contenido truncado por límite de tokens...]"
+            content = content[:max_chars] + "\n\n[...contenido truncado...]"
         return content.strip()
     except Exception as e:
         return f"⚠️ Error al procesar: {e}"
@@ -119,7 +119,7 @@ def truncate_for_tokens(text: str, max_tokens: int = 8000) -> str:
     if len(text) <= max_tokens * 4:
         return text
     chunk = max_tokens * 2
-    return text[:chunk] + "\n\n[...resumen intermedio omitido...]\n\n" + text[-chunk:]
+    return text[:chunk] + "\n\n[...omitido...]\n\n" + text[-chunk:]
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  CONSTRUCTOR DE CONTEXTO PARA IA
@@ -129,42 +129,38 @@ def build_portfolio_context(res: dict, prices: pd.DataFrame = None,
                            portfolio_name: str = "Portafolio",
                            include_correlations: bool = True) -> str:
     lines = []
-    lines.append(f"📊 ANÁLISIS DE PORTAFOLIO: {portfolio_name}")
-    lines.append(f"Generado el: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M')}")
+    lines.append(f"📊 ANÁLISIS: {portfolio_name}")
+    lines.append(f"Fecha: {pd.Timestamp.now().strftime('%Y-%m-%d')}")
     lines.append("")
     lines.append("🎯 MÉTRICAS GLOBALES:")
     lines.append(f"- Retorno esperado anual: {res['expected_return']:.2%}")
     lines.append(f"- Volatilidad anualizada: {res['volatility']:.2%}")
-    lines.append(f"- Ratio Sharpe (RF={0.02:.1%}): {res['sharpe_ratio']:.2f}")
-    lines.append(f"- Método de optimización: {res.get('method', 'N/A')}")
+    lines.append(f"- Ratio Sharpe: {res['sharpe_ratio']:.2f}")
+    lines.append(f"- Método: {res.get('method', 'N/A')}")
     lines.append("")
     
-    lines.append("🧩 COMPOSICIÓN DEL PORTAFOLIO (Pesos Reales):")
+    lines.append("🧩 COMPOSICIÓN:")
     active_assets = [(t, w) for t, w in zip(res['tickers'], res['weights']) if w > 0.001]
     active_assets.sort(key=lambda x: x[1], reverse=True)
     total_weight = sum(w for _, w in active_assets)
     
     for ticker, weight in active_assets:
         pct = weight / total_weight * 100 if total_weight > 0 else 0
-        lines.append(f"- {ticker:<10} : {pct:5.1f}%  (peso: {weight:.4f})")
+        lines.append(f"- {ticker:<10}: {pct:5.1f}% (peso: {weight:.4f})")
     
-    if active_assets:
-        top_weight = active_assets[0][1] / total_weight if total_weight > 0 else 0
-        if top_weight > 0.4:
-            lines.append(f"  ⚠️ ALERTA: Concentración alta en {active_assets[0][0]} ({top_weight:.1%})")
+    if active_assets and active_assets[0][1]/total_weight > 0.4:
+        lines.append(f"  ⚠️ Concentración alta en {active_assets[0][0]}")
     lines.append("")
     
     if prices is not None and not prices.empty and len(prices) >= 30:
         returns = prices.pct_change().dropna()
-        lines.append("📈 MÉTRICAS INDIVIDUALES (histórico):")
+        lines.append("📈 MÉTRICAS INDIVIDUALES:")
         for ticker, weight in active_assets:
             if ticker in prices.columns and ticker in returns.columns:
                 ann_ret = returns[ticker].mean() * 252
                 ann_vol = returns[ticker].std() * np.sqrt(252)
                 sharpe_ind = (ann_ret - 0.02) / ann_vol if ann_vol > 0 else 0
-                neg_rets = returns[ticker][returns[ticker] < 0]
-                downside = neg_rets.std() * np.sqrt(252) if len(neg_rets) > 5 else ann_vol
-                lines.append(f"- {ticker}: Ret {ann_ret:6.1%} | Vol {ann_vol:5.1%} | Sharpe {sharpe_ind:5.2f} | Downside {downside:5.1%}")
+                lines.append(f"- {ticker}: Ret {ann_ret:6.1%} | Vol {ann_vol:5.1%} | Sharpe {sharpe_ind:5.2f}")
         lines.append("")
     
     if include_correlations and prices is not None and len(prices.columns) >= 2:
@@ -179,41 +175,36 @@ def build_portfolio_context(res: dict, prices: pd.DataFrame = None,
                         if abs(c_val) > 0.65:
                             high_corr_pairs.append((idx, col, c_val))
             if high_corr_pairs:
-                lines.append("🔗 CORRELACIONES SIGNIFICATIVAS:")
+                lines.append("🔗 CORRELACIONES ALTAS:")
                 for asset1, asset2, corr_val in high_corr_pairs:
                     w1 = next((w for t, w in active_assets if t == asset1), 0)
                     w2 = next((w for t, w in active_assets if t == asset2), 0)
                     combined_weight = (w1 + w2) / total_weight if total_weight > 0 else 0
-                    signal = "🔴" if corr_val > 0.8 else "🟡" if corr_val > 0.65 else "🟢"
-                    lines.append(f"  {signal} {asset1} ↔ {asset2}: {corr_val:+.2f}  (peso combinado: {combined_weight:.1%})")
+                    signal = "🔴" if corr_val > 0.8 else "🟡"
+                    lines.append(f"  {signal} {asset1} ↔ {asset2}: {corr_val:+.2f}")
                 lines.append("")
     
-    lines.append("🌍 EXPOSICIÓN IMPLÍCITA (estimada):")
-    exposures = {"ARS": 0, "USD": 0, "Equity": 0, "FixedIncome": 0, "Other": 0}
+    lines.append("🌍 EXPOSICIÓN IMPLÍCITA:")
+    exposures = {"ARS": 0, "USD": 0, "Equity": 0, "FixedIncome": 0}
     for ticker, weight in active_assets:
         t_upper = ticker.upper()
         if any(x in t_upper for x in ["AL30", "GD30", "GGAL", "YPF", "PAM", "TX26", "CEPU", "AR"]) and ".BA" not in t_upper:
             exposures["ARS"] += weight
             exposures["Equity"] += weight if any(x in t_upper for x in ["GGAL", "YPF", "PAM", "CEPU"]) else 0
             exposures["FixedIncome"] += weight if any(x in t_upper for x in ["AL30", "GD30", "TX26"]) else 0
-        elif "=X" in t_upper or any(x in t_upper for x in ["USD", "EUR", "BRL"]):
+        elif "=X" in t_upper or any(x in t_upper for x in ["USD", "EUR"]):
             exposures["USD"] += weight
-        elif any(x in t_upper for x in ["AAPL", "GOOGL", "MSFT", "SPY", "QQQ", ".US"]):
+        elif any(x in t_upper for x in ["AAPL", "GOOGL", "MSFT", "SPY", "QQQ"]):
             exposures["USD"] += weight
             exposures["Equity"] += weight
-        else:
-            exposures["Other"] += weight
     
     for exp_type, exp_weight in exposures.items():
         if exp_weight > 0.01:
             pct = exp_weight / total_weight * 100 if total_weight > 0 else 0
             lines.append(f"- {exp_type}: {pct:.1f}%")
-    if exposures["ARS"] / total_weight > 0.7 if total_weight > 0 else False:
-        lines.append("  ⚠️ ALERTA: Alta exposición a Argentina")
-    lines.append("")
     
     if prices is not None and not prices.empty:
-        lines.append(f"📊 DATOS: {len(prices)} observaciones | {prices.index.min().date()} a {prices.index.max().date()}")
+        lines.append(f"\n📊 DATOS: {len(prices)} observaciones")
     return "\n".join(lines)
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -241,9 +232,7 @@ def get_or_create_worksheet(client):
             ws = ss.add_worksheet(title=WORKSHEET_NAME, rows=200, cols=3)
             ws.append_row(["name", "tickers", "weights"])
             return ws
-    except Exception as e:
-        st.sidebar.error(f"❌ Google Sheets: {e}")
-        return None
+    except: return None
 
 def load_portfolios() -> dict:
     client = get_gsheets_client()
@@ -265,8 +254,7 @@ def load_portfolios() -> dict:
                     if total_w > 0: weights = [w / total_w for w in weights]
                     portfolios[name] = {"tickers": tickers, "weights": weights}
                 return portfolios
-            except Exception as e:
-                st.sidebar.warning(f"⚠️ Error leyendo Sheets: {e}")
+            except: pass
     if os.path.exists(PORTFOLIO_FILE):
         try:
             with open(PORTFOLIO_FILE, "r") as f: return json.load(f)
@@ -286,12 +274,10 @@ def save_portfolios(pf: dict) -> bool:
                     rows.append([n, ", ".join(d["tickers"]), ", ".join(str(w) for w in d["weights"])])
                 ws.update(rows, "A1")
         return True
-    except Exception as e:
-        st.error(f"Error guardando: {e}")
-        return False
+    except: return False
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  CORE FINANCIERO: PRECIOS & OPTIMIZACIÓN BASE
+#  CORE FINANCIERO
 # ═══════════════════════════════════════════════════════════════════════════
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -326,8 +312,7 @@ def fetch_stock_prices_for_portfolio(tickers, start_date, end_date):
                     clean = str(col).replace(".BA", "")
                     for orig in yf_tickers:
                         if clean == orig: all_prices[orig] = close_data[col]
-        except Exception as e:
-            st.warning(f"Yahoo Finance: {e}")
+        except: pass
             
     if not all_prices: return None
     prices = pd.concat(all_prices.values(), axis=1).ffill().dropna()
@@ -377,10 +362,6 @@ def optimize_portfolio_corporate(prices, risk_free_rate=0.02, opt_type="Maximo R
     m = get_metrics(w)
     return {"weights": w, "expected_return": float(m[0]), "volatility": float(m[1]), 
             "sharpe_ratio": float(m[2]), "tickers": list(prices.columns), "method": "Scipy-SLSQP"}
-
-# ═══════════════════════════════════════════════════════════════════════════
-#  OPTIMIZACIÓN AVANZADA
-# ═══════════════════════════════════════════════════════════════════════════
 
 def optimize_risk_parity(prices, risk_free_rate=0.02):
     if not PYPFOPT_OK: return None
@@ -486,28 +467,27 @@ def display_advanced_metrics(prices, res):
     st.plotly_chart(fig, use_container_width=True)
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  PÁGINA: DASHBOARD CORPORATIVO
+#  PÁGINAS
 # ═══════════════════════════════════════════════════════════════════════════
 
 def page_corporate_dashboard():
     st.title("📊 Dashboard Corporativo Integral")
     portfolios = st.session_state.get("portfolios", {})
     if not portfolios:
-        st.info("👈 Crea tu primer portafolio en la pestaña 'Gestión de Carteras'")
+        st.info("👈 Crea tu primer portafolio en la pestaña 'Gestión'")
         return
 
-    tabs = st.tabs(["💼 Gestión de Carteras", "🚀 Optimización Avanzada", "🔄 Rebalanceo Inteligente", "🔮 Forecast & Simulación"])
+    tabs = st.tabs(["💼 Gestión", "🚀 Optimización Avanzada", "🔄 Rebalanceo", "🔮 Forecast"])
 
-    # TAB 1: GESTIÓN
     with tabs[0]:
         c1, c2 = st.columns([1, 1.5])
         with c1:
             st.subheader("Administrar Carteras")
-            action = st.radio("Acción:", ["✨ Crear Nueva", "✏️ Editar / 🗑️ Eliminar"], horizontal=True)
-            if action == "✨ Crear Nueva":
-                p_name = st.text_input("Nombre de la Cartera", key="new_name")
-                p_tickers = st.text_area("Tickers (coma)", "AL30, GGAL, AAPL, SPY", key="new_tks").upper()
-                p_weights = st.text_area("Pesos (coma)", "0.25, 0.25, 0.25, 0.25", key="new_ws")
+            action = st.radio("Acción:", ["✨ Crear", "✏️ Editar/🗑️ Eliminar"], horizontal=True, key="dash_action")
+            if action == "✨ Crear":
+                p_name = st.text_input("Nombre", key="new_name")
+                p_tickers = st.text_area("Tickers (coma)", "AAPL, SPY", key="new_tks").upper()
+                p_weights = st.text_area("Pesos (coma)", "0.5, 0.5", key="new_ws")
                 if st.button("💾 Guardar", type="primary", key="save_new"):
                     try:
                         ts = [x.strip() for x in p_tickers.split(",") if x.strip()]
@@ -516,7 +496,7 @@ def page_corporate_dashboard():
                             tot = sum(ws); ws = [w/tot for w in ws]
                             portfolios[p_name] = {"tickers": ts, "weights": ws}
                             if save_portfolios(portfolios): st.success("✅ Guardado"); st.rerun()
-                        else: st.error("Verifica nombre y cantidad de pesos")
+                        else: st.error("Verifica datos")
                     except: st.error("Formato inválido")
             else:
                 if portfolios:
@@ -524,7 +504,7 @@ def page_corporate_dashboard():
                     d = portfolios[sel]
                     nn = st.text_input("Renombrar", value=sel, key="ren")
                     nt = st.text_area("Tickers", value=", ".join(d["tickers"]), key="et")
-                    nw = st.text_area("Pesos", value=", ".join(f"{w:.4f}" for w in d["weights"]), key="ew")
+                    nw = st.text_area("Pesos", value=", ".join(f"{w:.3f}" for w in d["weights"]), key="ew")
                     col_b1, col_b2 = st.columns(2)
                     if col_b1.button("🔄 Actualizar", key="upd"):
                         try:
@@ -535,9 +515,9 @@ def page_corporate_dashboard():
                                 if nn != sel: del portfolios[sel]
                                 portfolios[nn] = {"tickers": ts, "weights": ws}
                                 save_portfolios(portfolios); st.success("✅ Actualizado"); st.rerun()
-                        except: st.error("Error de formato")
+                        except: st.error("Error")
                     if col_b2.button("🗑️ Eliminar", key="del"):
-                        del portfolios[sel]; save_portfolios(portfolios); st.warning("🗑️ Eliminado"); st.rerun()
+                        del portfolios[sel]; save_portfolios(portfolios); st.warning("Eliminado"); st.rerun()
                 else: st.info("No hay carteras")
         with c2:
             st.subheader("📋 Base de Datos")
@@ -545,7 +525,6 @@ def page_corporate_dashboard():
                 df = pd.DataFrame([{"Nombre": k, "Activos": len(v["tickers"]), "Tickers": ", ".join(v["tickers"]), "Peso Mayor": f"{max(v['weights'])*100:.1f}%"} for k, v in portfolios.items()])
                 st.dataframe(df, hide_index=True, use_container_width=True)
 
-    # TAB 2: OPTIMIZACIÓN
     with tabs[1]:
         st.markdown("---")
         col1, col2, col3 = st.columns(3)
@@ -554,7 +533,7 @@ def page_corporate_dashboard():
         de = col3.date_input("Hasta", pd.to_datetime("today"), key="opt_de")
         
         if st.button("📊 Ver Histórico", key="hist_btn"):
-            with st.spinner("Cargando datos..."):
+            with st.spinner("Cargando..."):
                 prices = fetch_stock_prices_for_portfolio(portfolios[p_sel]["tickers"], ds, de)
             if prices is not None:
                 tks = [t for t in portfolios[p_sel]["tickers"] if t in prices.columns]
@@ -566,21 +545,20 @@ def page_corporate_dashboard():
                     r = (val.iloc[-1]/val.iloc[0]-1)*100
                     v = val.pct_change().dropna().std()*np.sqrt(252)*100
                     m1,m2,m3,m4 = st.columns(4)
-                    m1.metric("Retorno Total", f"{r:.1f}%")
-                    m2.metric("Volatilidad Anual", f"{v:.1f}%")
-                    m3.metric("Max Drawdown", f"{((val/val.cummax()-1).min()*100):.1f}%")
+                    m1.metric("Retorno", f"{r:.1f}%"); m2.metric("Volatilidad", f"{v:.1f}%")
+                    m3.metric("Max DD", f"{((val/val.cummax()-1).min()*100):.1f}%")
                     m4.metric("Sharpe", f"{(val.pct_change().mean()*252)/(val.pct_change().std()*np.sqrt(252)):.2f}")
                     fig = go.Figure()
                     fig.add_trace(go.Scatter(x=val.index, y=val, name=p_sel, line=dict(width=3, color='#00CC96')))
-                    fig.update_layout(title=f"Evolución: {p_sel}", template="plotly_dark", height=350)
+                    fig.update_layout(template="plotly_dark", height=350)
                     st.plotly_chart(fig, use_container_width=True)
         
         st.subheader("⚙️ Optimización Avanzada")
         opt_tabs = st.tabs(["📊 Markowitz", "⚖️ Risk Parity", "🎯 Black-Litterman", "🌳 HRP", "🔄 Comparar"])
         
         with opt_tabs[0]:
-            rf = st.number_input("Tasa Libre Riesgo", 0.0, 0.5, 0.04, key="rf_m")
-            tgt = st.selectbox("Objetivo", ["Maximo Ratio Sharpe", "Minima Volatilidad", "Retorno Maximo"], key="tgt_m")
+            rf = st.number_input("RF", 0.0, 0.5, 0.04, key="rf_m")
+            tgt = st.selectbox("Objetivo", ["Maximo Ratio Sharpe","Minima Volatilidad","Retorno Maximo"], key="tgt_m")
             if st.button("Optimizar Markowitz", key="run_m"):
                 with st.spinner("Optimizando..."):
                     prices = fetch_stock_prices_for_portfolio(portfolios[p_sel]["tickers"], ds, de)
@@ -589,7 +567,6 @@ def page_corporate_dashboard():
                     if res: st.session_state['opt_res'] = res; st.session_state['opt_prices'] = prices; st.success("✅ Listo"); st.rerun()
         
         with opt_tabs[1]:
-            st.info("⚖️ Distribuye riesgo equitativamente. Ideal para diversificación robusta.")
             if st.button("Optimizar Risk Parity", key="run_rp"):
                 with st.spinner("Calculando..."):
                     prices = fetch_stock_prices_for_portfolio(portfolios[p_sel]["tickers"], ds, de)
@@ -598,7 +575,6 @@ def page_corporate_dashboard():
                     if res: st.session_state['opt_res'] = res; st.session_state['opt_prices'] = prices; st.success("✅ Listo"); st.rerun()
         
         with opt_tabs[2]:
-            st.info("🎯 Combina equilibrio de mercado con tus views personales.")
             if st.button("Optimizar Black-Litterman", key="run_bl"):
                 with st.spinner("Calculando..."):
                     prices = fetch_stock_prices_for_portfolio(portfolios[p_sel]["tickers"], ds, de)
@@ -607,7 +583,6 @@ def page_corporate_dashboard():
                     if res: st.session_state['opt_res'] = res; st.session_state['opt_prices'] = prices; st.success("✅ Listo"); st.rerun()
         
         with opt_tabs[3]:
-            st.info("🌳 Usa clustering jerárquico. Muy robusto ante correlaciones inestables.")
             if st.button("Optimizar HRP", key="run_hrp"):
                 with st.spinner("Calculando..."):
                     prices = fetch_stock_prices_for_portfolio(portfolios[p_sel]["tickers"], ds, de)
@@ -641,37 +616,34 @@ def page_corporate_dashboard():
             display_advanced_metrics(prices, res)
             
             if st.button("🧠 Analizar con IA", key="ia_analyze"):
-                if not st.session_state.get("preferred_ai"): st.warning("Configura API Key en sidebar"); return
+                if not st.session_state.get("preferred_ai"): st.warning("Configura API Key"); return
                 with st.spinner("IA analizando..."):
                     ctx = build_portfolio_context(res, prices, p_sel)
-                    prompt = f"Actúa como CIO institucional. Analiza:\n{ctx}\n1. Diversificación real 2. Riesgos implícitos 3. Ajustes concretos de pesos 4. Alertas críticas. Español, viñetas claras."
+                    prompt = f"Actúa como CIO. Analiza:\n{ctx}\n1. Diversificación 2. Riesgos 3. Ajustes 4. Alertas. Español."
                     try:
                         if st.session_state.preferred_ai == "OpenAI":
                             client = OpenAI(api_key=st.session_state.openai_api_key)
-                            st.info(client.chat.completions.create(model=st.session_state.openai_model, messages=[{"role":"user","content":prompt}], temperature=0.2).choices[0].message.content)
+                            st.info(client.chat.completions.create(model=st.session_state.openai_model, messages=[{"role":"user","content":prompt}]).choices[0].message.content)
                         else:
                             genai.configure(api_key=st.session_state.gemini_api_key)
-                            st.info(genai.GenerativeModel(st.session_state.gemini_model).generate_content(prompt, generation_config={"temperature":0.2}).text)
+                            st.info(genai.GenerativeModel(st.session_state.gemini_model).generate_content(prompt).text)
                     except Exception as e: st.error(f"Error IA: {e}")
 
-    # TAB 3: REBALANCEO
     with tabs[2]:
-        if 'opt_res' not in st.session_state: st.info("Optimiza primero en la pestaña anterior"); return
+        if 'opt_res' not in st.session_state: st.info("Optimiza primero"); return
         res = st.session_state['opt_res']
         tgt_w = {t: w for t, w in zip(res['tickers'], res['weights'])}
         cur_w = {t: w for t, w in zip(portfolios[p_sel]["tickers"], portfolios[p_sel]["weights"])}
         drift = get_rebalancing_strategy(cur_w, tgt_w)
         
         c1,c2,c3 = st.columns(3)
-        c1.metric("Drift Máximo", f"{drift['max_drift']:.2%}")
-        c2.metric("Umbral", "5.0%")
-        c3.metric("Estado", drift['status'], delta_color="inverse" if drift['needs'] else "normal")
+        c1.metric("Drift Máx", f"{drift['max_drift']:.2%}"); c2.metric("Umbral", "5.0%"); c3.metric("Estado", drift['status'])
         
         df = pd.DataFrame({"Activo": list(tgt_w.keys()), "Actual (%)": [cur_w.get(t,0)*100 for t in tgt_w], "Target (%)": [tgt_w[t]*100 for t in tgt_w]})
         fig = go.Figure()
         fig.add_trace(go.Bar(x=df["Activo"], y=df["Actual (%)"], name="Actual", marker_color='rgba(239,85,59,0.7)'))
         fig.add_trace(go.Bar(x=df["Activo"], y=df["Target (%)"], name="Target", marker_color='rgba(0,204,150,0.7)'))
-        fig.update_layout(barmode='group', title="Drift vs Target", template="plotly_dark")
+        fig.update_layout(barmode='group', template="plotly_dark")
         st.plotly_chart(fig, use_container_width=True)
         
         if drift['needs']:
@@ -681,78 +653,52 @@ def page_corporate_dashboard():
                 trades = calculate_rebalancing_trades({t: val*cur_w.get(t,0) for t in tgt_w}, tgt_w, prices_now, val)
                 if not trades.empty:
                     st.dataframe(trades, use_container_width=True)
-                    st.download_button("📥 Descargar CSV", trades.to_csv(index=False).encode('utf-8'), "ordenes_rebalanceo.csv")
-                else: st.success("✅ No requiere rebalanceo")
+                    st.download_button("📥 Descargar CSV", trades.to_csv(index=False).encode('utf-8'), "ordenes.csv")
 
-    # TAB 4: FORECAST
     with tabs[3]:
         if 'opt_res' not in st.session_state: st.info("Optimiza primero"); return
         res = st.session_state['opt_res']
-        days = st.slider("Días Proyección", 30, 365, 90)
-        sims = st.selectbox("Simulaciones", [100, 500, 1000], 1)
-        if st.button("🔮 Simular Montecarlo"):
+        days = st.slider("Días", 30, 365, 90); sims = st.selectbox("Simulaciones", [100,500,1000], 1)
+        if st.button("🔮 Simular"):
             dt = 1/252; mu = res['expected_return']*dt; sig = res['volatility']*np.sqrt(dt)
-            paths = np.zeros((days, sims)); paths[0] = 100
-            for t in range(1, days): paths[t] = paths[t-1] * np.exp((mu - 0.5*sig**2) + sig*np.random.standard_normal(sims))
+            paths = np.zeros((days,sims)); paths[0] = 100
+            for t in range(1,days): paths[t] = paths[t-1] * np.exp((mu - 0.5*sig**2) + sig*np.random.standard_normal(sims))
             fig = go.Figure()
-            p95, p50, p05 = np.percentile(paths, [95, 50, 5], axis=1)
+            p95,p50,p05 = np.percentile(paths,[95,50,5],axis=1)
             x = np.arange(days)
-            fig.add_trace(go.Scatter(x=np.concatenate([x, x[::-1]]), y=np.concatenate([p95, p05[::-1]]), fill='toself', fillcolor='rgba(0,204,150,0.15)', line=dict(color='rgba(255,255,255,0)')))
-            fig.add_trace(go.Scatter(x=x, y=p50, line=dict(color='#00CC96', width=2)))
-            fig.add_trace(go.Scatter(x=x, y=p05, line=dict(color='#EF553B', dash='dash')))
-            fig.add_trace(go.Scatter(x=x, y=p95, line=dict(color='#636EFA', dash='dash')))
-            fig.update_layout(template="plotly_dark", height=400)
-            st.plotly_chart(fig, use_container_width=True)
+            fig.add_trace(go.Scatter(x=np.concatenate([x,x[::-1]]), y=np.concatenate([p95,p05[::-1]]), fill='toself', fillcolor='rgba(0,204,150,0.15)', line=dict(color='rgba(255,255,255,0)')))
+            fig.add_trace(go.Scatter(x=x, y=p50, line=dict(color='#00CC96',width=2)))
+            fig.add_trace(go.Scatter(x=x, y=p05, line=dict(color='#EF553B',dash='dash')))
+            fig.add_trace(go.Scatter(x=x, y=p95, line=dict(color='#636EFA',dash='dash')))
+            fig.update_layout(template="plotly_dark", height=400); st.plotly_chart(fig, use_container_width=True)
             c1,c2,c3,c4 = st.columns(4)
-            c1.metric("Mediana", f"${np.median(paths[-1]):.0f}")
-            c2.metric("P95", f"${np.percentile(paths[-1],95):.0f}")
-            c3.metric("P05", f"${np.percentile(paths[-1],5):.0f}")
-            c4.metric("Prob. Pérdida", f"{np.mean(paths[-1]<100)*100:.1f}%")
-
-# ═══════════════════════════════════════════════════════════════════════════
-#  PÁGINA: RENTA FIJA
-# ═══════════════════════════════════════════════════════════════════════════
+            c1.metric("Mediana", f"${np.median(paths[-1]):.0f}"); c2.metric("P95", f"${np.percentile(paths[-1],95):.0f}")
+            c3.metric("P05", f"${np.percentile(paths[-1],5):.0f}"); c4.metric("Prob. Pérdida", f"{np.mean(paths[-1]<100)*100:.1f}%")
 
 def page_fixed_income():
-    st.title("🏛️ Renta Fija: Análisis e Inmunización")
+    st.title("🏛️ Renta Fija")
     if 'bonds' not in st.session_state:
         st.session_state.bonds = pd.DataFrame({"Bono":["AL30","GD30","TX26"], "Cupón (%)":[2.5,3.0,1.5], "YTM (%)":[15,14,16], "Años":[5,8,2], "Nominal":[100000,150000,50000]})
-    
     df = st.data_editor(st.session_state.bonds, num_rows="dynamic", use_container_width=True, key="bond_editor")
     st.session_state.bonds = df
-    
-    results = []; total_inv = 0
+    results = []; tot = 0
     for _, r in df.iterrows():
         try:
             c = r["Cupón (%)"]/100/2; y = r["YTM (%)"]/100/2; n = int(r["Años"]*2)
             price = sum([c/(1+y)**t for t in range(1, n+1)]) + 1/(1+y)**n
             macd = sum([(t/2)*c/(1+y)**t for t in range(1, n+1)]) / (price*100)
             modd = macd / (1+y)
-            total_inv += r["Nominal"]
+            tot += r["Nominal"]
             results.append({"Bono": r["Bono"], "Precio": price*100, "MacDur": macd, "ModDur": modd, "Nominal": r["Nominal"]})
         except: pass
-        
-    if total_inv > 0 and results:
-        dr = pd.DataFrame(results)
-        dr["Peso"] = dr["Nominal"] / total_inv
-        pmd = (dr["ModDur"] * dr["Peso"]).sum()
+    if tot > 0 and results:
+        dr = pd.DataFrame(results); dr["Peso"] = dr["Nominal"]/tot
+        pmd = (dr["ModDur"]*dr["Peso"]).sum()
         c1,c2,c3 = st.columns(3)
-        c1.metric("Duration Mod. Portafolio", f"{pmd:.2f}")
-        c2.metric("Inversión Total", f"${total_inv:,.0f}")
-        horizonte = c3.slider("Horizonte (Años)", 0.5, 20.0, 5.0, 0.5)
-        
-        gap = pmd - horizonte
-        if abs(gap) < 0.25: st.success(f"✅ Inmunizado: Duration ≈ Horizonte")
-        elif gap > 0: st.warning(f"⚠️ Riesgo de Precio: Duration > Horizonte")
-        else: st.info(f"ℹ️ Riesgo de Reinversión: Duration < Horizonte")
-        
+        c1.metric("Duration Mod.", f"{pmd:.2f}"); c2.metric("Inversión Total", f"${tot:,.0f}")
+        c3.slider("Horizonte (Años)", 1, 20, 5)
         st.dataframe(dr.style.format({"Precio":"{:.2f}", "MacDur":"{:.2f}", "ModDur":"{:.2f}", "Peso":"{:.1%}"}), use_container_width=True)
-    else:
-        st.info("Agrega bonos a la tabla para ver el análisis.")
-
-# ═══════════════════════════════════════════════════════════════════════════
-#  OTRAS PÁGINAS
-# ═══════════════════════════════════════════════════════════════════════════
+    else: st.info("Agrega bonos para ver análisis.")
 
 def page_yahoo_explorer():
     st.title("🌎 Explorador Yahoo Finance")
@@ -764,7 +710,7 @@ def page_yahoo_explorer():
         info = s.info
         c1,c2,c3,c4 = st.columns(4)
         c1.metric("Precio", f"${info.get('currentPrice', h['Close'].iloc[-1]):.2f}")
-        c2.metric("Market Cap", f"${info.get('marketCap','N/A'):,}")
+        c2.metric("Cap", f"${info.get('marketCap','N/A'):,}")
         c3.metric("Beta", info.get('beta','N/A'))
         c4.metric("Sector", info.get('sector','N/A'))
         fig = go.Figure(data=[go.Candlestick(x=h.index, open=h['Open'], high=h['High'], low=h['Low'], close=h['Close'])])
@@ -772,14 +718,14 @@ def page_yahoo_explorer():
     except Exception as e: st.error(f"Error: {e}")
 
 def page_event_analyzer():
-    st.header("📰 Analizador de Noticias con IA")
+    st.header("📰 Analizador de Noticias")
     if not st.session_state.get("preferred_ai"): st.warning("Configura API Key"); return
     txt = st.text_area("Pega noticia o análisis", height=150)
     if st.button("Analizar"):
         if not txt.strip(): st.warning("Escribe algo"); return
         with st.spinner("Analizando..."):
             try:
-                p = f"Analiza como experto financiero:\n{txt}\n1. Resumen 2. Impacto 3. Activos expuestos 4. Recomendación. Español."
+                p = f"Analiza como experto financiero:\n{txt}\n1. Resumen 2. Impacto 3. Activos 4. Recomendación. Español."
                 if st.session_state.preferred_ai == "OpenAI":
                     st.info(OpenAI(api_key=st.session_state.openai_api_key).chat.completions.create(model=st.session_state.openai_model, messages=[{"role":"user","content":p}]).choices[0].message.content)
                 else:
@@ -803,23 +749,16 @@ def page_chat_general():
             st.session_state.msgs.append({"role":"assistant","content":r}); st.chat_message("assistant").write(r)
         except Exception as e: st.error(f"Error: {e}")
 
-# ═══════════════════════════════════════════════════════════════════════════
-#  ASISTENTE QUANT CON TICKERS REALES
-# ═══════════════════════════════════════════════════════════════════════════
-
 @st.cache_data(ttl=1800)
 def get_iol_tickers_cache():
     client = get_iol_client()
     if not client: return {}
     try:
         cats = {"Acciones":[], "CEDEARs":[], "Bonos":[], "ONs":[]}
-        # Fallback estático si la API falla o no expone listas completas
-        fallback = {
-            "Acciones": ["GGAL","YPF","PAM","TX26","CEPU","ALUA","SUPV","MIRG","COME","VALO"],
-            "CEDEARs": ["AAPL","GOOGL","MSFT","AMZN","TSLA","NVDA","META","KO","MCD","V"],
-            "Bonos": ["AL30","GD30","TX26","AL35","GD35","TX29","AL30D","GD30D","TX26D"],
-            "ONs": ["YPFD","PAMP","GGAL","ALUA","TX26","CEPU","SUPV","MIRG"]
-        }
+        fallback = {"Acciones": ["GGAL","YPF","PAM","TX26","CEPU","ALUA","SUPV","MIRG","COME","VALO"],
+                    "CEDEARs": ["AAPL","GOOGL","MSFT","AMZN","TSLA","NVDA","META","KO","MCD","V"],
+                    "Bonos": ["AL30","GD30","TX26","AL35","GD35","TX29","AL30D","GD30D","TX26D"],
+                    "ONs": ["YPFD","PAMP","GGAL","ALUA","TX26","CEPU","SUPV","MIRG"]}
         for c in cats:
             try:
                 df = client.get_instruments(category=c.lower())
@@ -850,7 +789,7 @@ def page_ai_strategy_assistant():
     
     with tabs[0]:
         st.subheader("Diseña tu Portafolio con IA")
-        with st.expander("📋 Tickers de Referencia Cargados"):
+        with st.expander("📋 Tickers de Referencia"):
             c1,c2 = st.columns(2)
             iol = get_iol_tickers_cache(); yah = get_yahoo_tickers_cache()
             with c1:
@@ -862,22 +801,20 @@ def page_ai_strategy_assistant():
                 for k,v in yah.items():
                     st.text(f"{k}: {', '.join(v[:5])}...")
         
-        strat = st.text_area("Describe tu estrategia de inversión:", height=120, 
-                             placeholder="Ej: Portafolio conservador con bonos soberanos ARS y ETFs de dividendos USA...")
+        strat = st.text_area("Describe tu estrategia:", height=120, placeholder="Ej: Portafolio conservador con bonos ARS y dividendos USA...")
         col1,col2,col3 = st.columns(3)
-        risk = col1.select_slider("Perfil de Riesgo", ["Conservador","Moderado","Agresivo","Muy Agresivo"], "Moderado")
-        hor = col2.selectbox("Horizonte", ["Corto (1-2 años)","Mediano (3-5 años)","Largo (+5 años)"], "Mediano")
-        mkt = col3.multiselect("Mercados Preferidos", ["Argentina","USA","Internacional","Emergentes"], ["USA"])
+        risk = col1.select_slider("Riesgo", ["Conservador","Moderado","Agresivo","Muy Agresivo"], "Moderado")
+        hor = col2.selectbox("Horizonte", ["Corto","Mediano","Largo"], "Mediano")
+        mkt = col3.multiselect("Mercados", ["Argentina","USA","Internacional","Emergentes"], ["USA"])
         
-        if st.button(" Generar Estrategia con Tickers Reales", type="primary"):
+        if st.button(" Generar Estrategia", type="primary"):
             if not strat.strip(): st.warning("Describe tu estrategia."); return
             iol = get_iol_tickers_cache(); yah = get_yahoo_tickers_cache()
             ctx = "\n📋 TICKERS DISPONIBLES REALES:\n"
             if iol: ctx += "\n=== IOL ===\n" + "\n".join(f"- {k}: {safe_join_list(v)}" for k,v in iol.items() if v)
             if yah: ctx += "\n=== YAHOO ===\n" + "\n".join(f"- {k}: {safe_join_list(v)}" for k,v in yah.items())
             
-            sys_p = """Eres un gestor cuantitativo senior. Selecciona tickers REALES de las listas proporcionadas. 
-Devuelve EXCLUSIVAMENTE un bloque JSON válido con esta estructura:
+            sys_p = """Eres un gestor cuantitativo senior. Selecciona tickers REALES de las listas. Devuelve EXCLUSIVAMENTE JSON válido:
 {
   "strategy_name": "string",
   "risk_profile": "string",
@@ -891,16 +828,16 @@ Devuelve EXCLUSIVAMENTE un bloque JSON válido con esta estructura:
   "rebalancing_frequency": "string",
   "notes": "string"
 }
-REGLAS: Pesos deben sumar 1.0. Usa SOLO tickers de las listas. Sé específico."""
+Pesos deben sumar 1.0. Usa SOLO tickers de las listas."""
             
             full = f"{sys_p}\n\nUsuario: {risk} | {hor} | {', '.join(mkt)}\nEstrategia: {strat}\n{ctx}"
-            with st.spinner("🤖 IA analizando y seleccionando tickers..."):
+            with st.spinner("🤖 IA analizando..."):
                 try:
                     raw = ""
                     if st.session_state.preferred_ai == "OpenAI":
                         raw = OpenAI(api_key=st.session_state.openai_api_key).chat.completions.create(
                             model=st.session_state.openai_model, 
-                            messages=[{"role":"system","content":"JSON ONLY. No markdown. No explanation."},
+                            messages=[{"role":"system","content":"JSON ONLY. No markdown."},
                                       {"role":"user","content":full}], temperature=0.3).choices[0].message.content
                     else:
                         genai.configure(api_key=st.session_state.gemini_api_key)
@@ -910,15 +847,15 @@ REGLAS: Pesos deben sumar 1.0. Usa SOLO tickers de las listas. Sé específico."
                     match = re.search(r'\{.*\}', raw, re.DOTALL)
                     if match:
                         data = json.loads(match.group(0))
-                        st.success("✅ Estrategia generada exitosamente")
+                        st.success("✅ Estrategia generada")
                         
-                        rt1,rt2,rt3,rt4 = st.tabs(["📊 Resumen", "🥧 Asignación", "📋 Tickers Seleccionados", "💾 Exportar"])
+                        rt1,rt2,rt3,rt4 = st.tabs(["📊 Resumen", "🥧 Asignación", "📋 Tickers", "💾 Exportar"])
                         with rt1:
                             c1,c2,c3 = st.columns(3)
                             c1.metric("Nombre", data.get("strategy_name","N/A"))
                             c2.metric("Riesgo", data.get("risk_profile","N/A"))
                             c3.metric("Rebalanceo", data.get("rebalancing_frequency","N/A"))
-                            st.info(data.get("notes","Sin notas adicionales"))
+                            st.info(data.get("notes",""))
                         with rt2:
                             alloc = data.get("asset_allocation",{})
                             if alloc:
@@ -936,24 +873,21 @@ REGLAS: Pesos deben sumar 1.0. Usa SOLO tickers de las listas. Sé específico."
                                             "name": data.get("strategy_name","IA Strategy"),
                                             "market": mkt_name
                                         }
-                                        st.success(f"✅ Guardado. Ve al Dashboard para optimizar.")
+                                        st.success(f"✅ Guardado. Ve al Dashboard.")
                         with rt4:
-                            st.download_button("📥 Descargar JSON", json.dumps(data, indent=4, ensure_ascii=False), f"strategy_{data.get('strategy_name','quant')}.json")
-                            if "portfolios" in data:
+                            st.download_button("📥 JSON", json.dumps(data, indent=4, ensure_ascii=False), f"strategy_{data.get('strategy_name','quant')}.json")
+                            if "portfolios" in 
                                 rows = []
                                 for m, a in data["portfolios"].items():
                                     for x in a: rows.append({"Mercado":m,"Ticker":x["ticker"],"Peso":x["weight"],"Razón":x["reason"]})
-                                st.download_button("📥 Descargar CSV", pd.DataFrame(rows).to_csv(index=False).encode('utf-8'), f"tickers_{data.get('strategy_name','quant')}.csv")
+                                st.download_button("📥 CSV", pd.DataFrame(rows).to_csv(index=False).encode('utf-8'), f"tickers_{data.get('strategy_name','quant')}.csv")
                         st.session_state['last_quant'] = data
-                    else:
-                        st.error("❌ La IA no devolvió JSON válido"); st.code(raw)
-                except json.JSONDecodeError as e:
-                    st.error(f"❌ Error parseando JSON: {e}"); st.code(raw)
-                except Exception as e:
-                    st.error(f"❌ Error: {type(e).__name__}: {e}")
+                    else: st.error("❌ JSON inválido"); st.code(raw)
+                except json.JSONDecodeError as e: st.error(f"❌ Error JSON: {e}"); st.code(raw)
+                except Exception as e: st.error(f"❌ Error: {type(e).__name__}: {e}")
 
     with tabs[1]:
-        st.subheader("🏦 Tickers Disponibles en IOL")
+        st.subheader("🏦 Tickers IOL")
         iol = get_iol_tickers_cache()
         if not iol: st.info("Conecta IOL o usa lista estática")
         for k,v in iol.items():
@@ -964,7 +898,7 @@ REGLAS: Pesos deben sumar 1.0. Usa SOLO tickers de las listas. Sé específico."
                         with cols[i%5]: st.code(t)
 
     with tabs[2]:
-        st.subheader("🌎 Tickers Populares Yahoo Finance")
+        st.subheader("🌎 Tickers Yahoo")
         yah = get_yahoo_tickers_cache()
         for k,v in yah.items():
             with st.expander(f"{k} ({len(v)})"):
@@ -973,12 +907,12 @@ REGLAS: Pesos deben sumar 1.0. Usa SOLO tickers de las listas. Sé específico."
                     with cols[i%6]: st.code(t)
 
     with tabs[3]:
-        st.subheader("🔥 Market Movers (Referencia)")
+        st.subheader("🔥 Movers (Referencia)")
         c1,c2,c3 = st.columns(3)
         c1.metric("Top Gainers", "NVDA, TSLA, META")
         c2.metric("Top Volume", "AAPL, SPY, AMD")
         c3.metric("IOL Top", "AL30, GGAL, YPF")
-        if st.button("🔄 Refrescar Cache"): st.cache_data.clear(); st.rerun()
+        if st.button("🔄 Refrescar"): st.cache_data.clear(); st.rerun()
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  SIDEBAR & ROUTER
@@ -989,15 +923,18 @@ if 'portfolios' not in st.session_state: st.session_state.portfolios = load_port
 
 st.sidebar.title("⚙️ Configuración")
 if get_gsheets_client(): st.sidebar.success("🟢 Google Sheets")
-else: st.sidebar.info("📁 Almacenamiento Local")
+else: st.sidebar.info("📁 Local")
 
+# ═══════════════════════════════════════════════════════════════════════════
+#  FIX: Añadidos 'key' únicos y etiquetas diferenciadas para evitar duplicados
+# ═══════════════════════════════════════════════════════════════════════════
 with st.sidebar.expander("🤖 IA (OpenAI)", expanded=True):
-    st.session_state.openai_api_key = st.text_input("API Key", type="password", value=st.session_state.get('openai_api_key',''))
-    st.session_state.openai_model = st.selectbox("Modelo", ["gpt-4o","gpt-4o-mini"], index=0)
+    st.session_state.openai_api_key = st.text_input("OpenAI API Key", type="password", value=st.session_state.get('openai_api_key',''), key="sk_openai")
+    st.session_state.openai_model = st.selectbox("Modelo OpenAI", ["gpt-4o","gpt-4o-mini"], index=0, key="sel_openai_model")
 
 with st.sidebar.expander("🧠 IA (Gemini)", expanded=False):
-    st.session_state.gemini_api_key = st.text_input("API Key", type="password", value=st.session_state.get('gemini_api_key',''))
-    st.session_state.gemini_model = st.selectbox("Modelo", ["gemini-2.0-flash","gemini-1.5-pro"], index=0)
+    st.session_state.gemini_api_key = st.text_input("Gemini API Key", type="password", value=st.session_state.get('gemini_api_key',''), key="sk_gemini")
+    st.session_state.gemini_model = st.selectbox("Modelo Gemini", ["gemini-2.0-flash","gemini-1.5-pro"], index=0, key="sel_gemini_model")
 
 ais = []
 if OPENAI_OK and st.session_state.get('openai_api_key'): ais.append("OpenAI")
@@ -1006,8 +943,8 @@ if ais: st.session_state.preferred_ai = st.sidebar.radio("✨ Motor IA Activo", 
 else: st.session_state.preferred_ai = None; st.sidebar.warning("⚠️ Ingresa API Key")
 
 with st.sidebar.expander("🏦 Conexión IOL", expanded=True):
-    u = st.text_input("Usuario", value=st.session_state.get('iol_username',''))
-    p = st.text_input("Contraseña", type="password", value=st.session_state.get('iol_password',''))
+    u = st.text_input("Usuario IOL", value=st.session_state.get('iol_username',''))
+    p = st.text_input("Contraseña IOL", type="password", value=st.session_state.get('iol_password',''))
     if st.button("Conectar", use_container_width=True):
         st.session_state.iol_username = u; st.session_state.iol_password = p
         try: st.session_state.iol_connected = get_iol_client() is not None
@@ -1027,16 +964,8 @@ if sel != st.session_state.selected_page:
     st.rerun()
 
 if sel == "Inicio":
-    st.title("📈 INVERSIONES PRO - Finanzas Corporativas")
-    st.markdown("""
-    ### 🚀 Plataforma Integral de Gestión de Portafolios
-    🔹 **Optimización Avanzada**: Markowitz, Risk Parity, Black-Litterman, HRP  
-    🔹 **Análisis de Riesgo**: VaR, CVaR, Sortino, Calmar, Omega ratios  
-    🔹 **Rebalanceo Inteligente**: Detección de drift + generación de órdenes  
-    🔹 **IA Integrada**: GPT-4 / Gemini con tickers reales de IOL y Yahoo  
-    🔹 **Multi-activo**: Acciones, bonos, ETFs, mercados emergentes  
-    💡 *Recomendación*: Comienza en **Dashboard Corporativo** para crear y optimizar tu primer portafolio.
-    """)
+    st.title("📈 INVERSIONES PRO")
+    st.markdown("### Plataforma Integral de Gestión de Portafolios\n🔹 Optimización Avanzada | 🔹 Rebalanceo Inteligente | 🔹 IA Integrada | 🔹 Tickers Reales IOL/Yahoo")
 elif sel == "📊 Dashboard Corporativo": page_corporate_dashboard()
 elif sel == "🏛️ Renta Fija": page_fixed_income()
 elif sel == "🧠 Asistente Quant": page_ai_strategy_assistant()
