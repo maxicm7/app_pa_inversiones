@@ -15,5 +15,6 @@ openai
 tbats
 xgboost
 lightgbm
+PyPortfolioOpt
 gspread 
 google-auth
