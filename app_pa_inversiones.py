@@ -562,7 +562,7 @@ def page_corporate_dashboard():
             if st.button("Optimizar Markowitz", key="run_m"):
                 with st.spinner("Optimizando..."):
                     prices = fetch_stock_prices_for_portfolio(portfolios[p_sel]["tickers"], ds, de)
-                if prices:
+                if prices is not None and not prices.empty:
                     res = optimize_portfolio_corporate(prices, rf, tgt)
                     if res: st.session_state['opt_res'] = res; st.session_state['opt_prices'] = prices; st.success("✅ Listo"); st.rerun()
         
@@ -570,7 +570,7 @@ def page_corporate_dashboard():
             if st.button("Optimizar Risk Parity", key="run_rp"):
                 with st.spinner("Calculando..."):
                     prices = fetch_stock_prices_for_portfolio(portfolios[p_sel]["tickers"], ds, de)
-                if prices:
+                if prices is not None and not prices.empty:
                     res = optimize_risk_parity(prices)
                     if res: st.session_state['opt_res'] = res; st.session_state['opt_prices'] = prices; st.success("✅ Listo"); st.rerun()
         
@@ -578,7 +578,7 @@ def page_corporate_dashboard():
             if st.button("Optimizar Black-Litterman", key="run_bl"):
                 with st.spinner("Calculando..."):
                     prices = fetch_stock_prices_for_portfolio(portfolios[p_sel]["tickers"], ds, de)
-                if prices:
+                if prices is not None and not prices.empty:
                     res = optimize_black_litterman(prices)
                     if res: st.session_state['opt_res'] = res; st.session_state['opt_prices'] = prices; st.success("✅ Listo"); st.rerun()
         
@@ -586,14 +586,14 @@ def page_corporate_dashboard():
             if st.button("Optimizar HRP", key="run_hrp"):
                 with st.spinner("Calculando..."):
                     prices = fetch_stock_prices_for_portfolio(portfolios[p_sel]["tickers"], ds, de)
-                if prices:
+                if prices is not None and not prices.empty:
                     res = optimize_hierarchical_risk_parity(prices)
                     if res: st.session_state['opt_res'] = res; st.session_state['opt_prices'] = prices; st.success("✅ Listo"); st.rerun()
         
         with opt_tabs[4]:
             if st.button("Comparar Todos", key="cmp"):
                 prices = fetch_stock_prices_for_portfolio(portfolios[p_sel]["tickers"], ds, de)
-                if prices:
+                if prices is not None and not prices.empty:
                     rows = []
                     for fn, name in [(optimize_portfolio_corporate, "Markowitz"), (optimize_risk_parity, "Risk Parity"), (optimize_hierarchical_risk_parity, "HRP")]:
                         r = fn(prices) if fn != optimize_portfolio_corporate else fn(prices, 0.04, "Maximo Ratio Sharpe")
@@ -804,7 +804,10 @@ def page_ai_strategy_assistant():
         strat = st.text_area("Describe tu estrategia:", height=120, placeholder="Ej: Portafolio conservador con bonos ARS y dividendos USA...")
         col1,col2,col3 = st.columns(3)
         risk = col1.select_slider("Riesgo", ["Conservador","Moderado","Agresivo","Muy Agresivo"], "Moderado")
+        
+        # FIX APLICADO: Index en lugar de value string
         hor = col2.selectbox("Horizonte", ["Corto","Mediano","Largo"], index=1)
+        
         mkt = col3.multiselect("Mercados", ["Argentina","USA","Internacional","Emergentes"], ["USA"])
         
         if st.button(" Generar Estrategia", type="primary"):
@@ -926,7 +929,6 @@ st.sidebar.title("⚙️ Configuración")
 if get_gsheets_client(): st.sidebar.success("🟢 Google Sheets")
 else: st.sidebar.info("📁 Local")
 
-# FIX: Inputs con keys únicos para evitar StreamlitDuplicateElementId
 with st.sidebar.expander("🤖 IA (OpenAI)", expanded=True):
     st.session_state.openai_api_key = st.text_input("OpenAI API Key", type="password", value=st.session_state.get('openai_api_key',''), key="sk_openai")
     st.session_state.openai_model = st.selectbox("Modelo OpenAI", ["gpt-4o","gpt-4o-mini"], index=0, key="sel_openai_model")
