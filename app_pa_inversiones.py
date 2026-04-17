@@ -935,7 +935,7 @@ with st.sidebar.expander("🤖 IA (OpenAI)", expanded=True):
 
 with st.sidebar.expander("🧠 IA (Gemini)", expanded=False):
     st.session_state.gemini_api_key = st.text_input("Gemini API Key", type="password", value=st.session_state.get('gemini_api_key',''), key="sk_gemini")
-    st.session_state.gemini_model = st.selectbox("Modelo Gemini", ["gemini-2.0-flash","gemini-1.5-pro"], index=0, key="sel_gemini_model")
+    st.session_state.gemini_model = st.selectbox("Modelo Gemini", ["gemini-2.5-flash","gemini-1.5-pro"], index=0, key="sel_gemini_model")
 
 ais = []
 if OPENAI_OK and st.session_state.get('openai_api_key'): ais.append("OpenAI")
