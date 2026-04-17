@@ -218,16 +218,31 @@ def get_gsheets_client():
         return None
     try:
         scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-        creds_dict = dict(st.secrets["gcp_service_account"])
+        
+        # 1. Intentamos leer tu formato exacto de JSON
+        if "google_sheets" in st.secrets and "service_account_json" in st.secrets["google_sheets"]:
+            json_str = st.secrets["google_sheets"]["service_account_json"]
+            creds_dict = json.loads(json_str)
+        # 2. Por si acaso, mantenemos la otra forma como plan B
+        elif "gcp_service_account" in st.secrets:
+            creds_dict = dict(st.secrets["gcp_service_account"])
+        else:
+            st.sidebar.error("No se encontró la configuración en los Secrets.")
+            return None
+            
+        # Arreglamos los saltos de línea de la llave privada
         if "private_key" in creds_dict:
             creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
+            
+        # Autorizamos
         creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
         return gspread.authorize(creds)
-    except KeyError:
-        st.sidebar.error("Falta [gcp_service_account] en los Secrets de Streamlit.")
+        
+    except json.JSONDecodeError:
+        st.sidebar.error("El texto de 'service_account_json' no es un JSON válido. Revisa las comillas.")
         return None
     except Exception as e:
-        st.sidebar.error(f"Error Google Sheets: {e}")
+        st.sidebar.error(f"Error al conectar con Google Sheets: {e}")
         return None
 
 def get_or_create_worksheet(client):
